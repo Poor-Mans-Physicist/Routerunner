@@ -3,17 +3,12 @@
 A client-side Forge mod for [Wold's Vaults](https://www.curseforge.com/minecraft/modpacks/wolds-vaults) (Minecraft 1.18.2)
 that helps you loot more chests per minute in vaults.
 
-- **Live metrics HUD.** Chests broken, average chests/min (overall and with pauses excluded), and a 30-second rolling rate.
-- **Loot rates.** Per-minute rates for the loot of one chest type (gilded, ornate, living or wooden). By default it
-  watches your first 100 chests and picks the type you break most.
-- **Route overlay.** For each room it solves a looting route and draws it in the world: where to walk, sprint-jump,
-  drop or trident-dash, and which chest to break next. It reads your Chain Miner tier so it knows how many chests a
-  single break clears.
+- **Live metrics HUD.** Displays total chests broken, average chests/min (overall and with pauses excluded), and a sliding 1 minute average. Also has the ability to disable hunter boxes.
+- **Route overlay.** Toggleable route overlay that displays an optimized path and target chest waypoints to break, calculated in real time by a solver room by room, speced to your speed and chain miner level (currently ONLY supports chain miner, will not function well if you're not using it). The solver is very light on performance, and a help guide exists in the config menu to let you know how to follow the route. 
 - **Vault history.** Every vault you finish is saved with its chest count, rates, modifiers and loot totals.
-- **Run logs.** Each vault writes a `vault_*.jsonl` file with the planned routes, the path you actually took and your
-  chest breaks, for anyone who wants to analyse their runs.
+- **Run logs.** Each vault writes a `vault_*.jsonl` file with the planned routes and the exact route you ended up taking, which can be used to analyze your runs, and will have the future use of letting the solver adapt to your playstyle and get better over time. 
 
-It only runs inside the vault dimension and needs nothing on the server.
+It only runs inside the vault dimension and is fully clientside.
 
 ## Installing
 
@@ -21,7 +16,7 @@ It only runs inside the vault dimension and needs nothing on the server.
    (under **Assets** on the latest release).
 2. Put it in the `mods` folder of your Wold's Vaults instance. In the CurseForge app: right-click the instance, pick
    **Open Folder**, then open `mods`.
-3. Start the game. Only you need it; the server and other players don't.
+3. Start the game. You can join regular WV servers with it, and it should remain stable across WV updates. 
 
 To uninstall, delete the jar. Settings and logs live in `config/routerunner/` inside the instance folder.
 
@@ -36,9 +31,9 @@ Press **`[`** to open the menu. You can rebind it under Options → Controls →
 | Routerunner | Turns the whole mod on or off. |
 | Routing | Turns the route overlay on or off. With it off you just get the metrics and loot HUD. |
 | Track loot | Which chest type's loot to rate: `AUTO` (picks after 100 chests), `GILDED`, `ORNATE`, `LIVING`, `WOODEN`, or `ALL` (hides the loot panel). Changing it clears the loot counters. |
-| Diff Route | Keeps solving routes in the background while Routing is off, and logs how your own path compared with the solver's for each room. |
-| Hunter boxes | Hides or shows the Hunter ability's chest outlines so they don't clutter the route. |
-| Adaptive Weights | Adjusts the route to how fast you actually move, learned over your runs. Turn it off to use the sliders exactly as set. |
+| Diff Route | Keeps solving routes in the background while Routing is off, and logs how your own path compared with the solver's for each room (no performance impact, it's recommended you keep this on). |
+| Hunter boxes | Hides or shows Hunter boxes (includes chests, doors, etc.) so they don't clutter the route. |
+| Adaptive Weights | Adjusts the route to how fast you actually move, learned over your runs. Turn it off to use the default weights and stop learning. |
 | Missed-waypoint skip | If you've already passed a waypoint, or most of its chests are gone, the route moves on instead of sending you back. |
 | Target arrow | Shows an arrow at the edge of the screen pointing to the next target when it's out of view. |
 
@@ -50,7 +45,7 @@ Press **`[`** to open the menu. You can rebind it under Options → Controls →
 | View Past Vaults | Scrollable list of your finished vaults, newest first. |
 | New Lap | Resets the HUD counters without touching the vault's log. Handy for comparing attempts in the same vault. |
 | Open Log Folder | Opens the folder with the `vault_*.jsonl` run logs. |
-| Adjust Weights | Sliders for the route solver, grouped into tabs (Bail, Move, Open, Cluster, Shafts, Sprint). Changes apply from the next room. Hover a slider to see what it does. **Reset all to defaults** is there if you get lost. |
+| Adjust Weights | Sliders for the route solver, grouped into tabs (Bail, Move, Open, Cluster, Shafts, Sprint). Changes apply from the next room. Hover over a slider to see what it does. **Reset all to defaults** is there if you get lost. |
 | Help | In-game guide to the route colours and markers. |
 | Lookahead | How many upcoming waypoints the overlay shows. |
 
@@ -60,26 +55,13 @@ Press **`[`** to open the menu. You can rebind it under Options → Controls →
   **white** = you'll double back here, **red** = the stretch you're on now.
 - Markers: **pink (1)** = break this chest next, **blue (2)** = the one after, **dark blue** = further ahead,
   **orange** = the exit.
-- The route skips awkward, walled-in chests on purpose, because breaking a neighbour chains them anyway. Don't go back
+- The route skips awkward, walled-in chests on purpose, because breaking nearby chests will reach them anyway. Don't go back
   for them.
 - If it's too jumpy or skips too much, start with **Bail aggression** and **Break reach** in Adjust Weights.
 
-## Building from source
-
-You need JDK 17. The mod compiles against Vault Hunters (`the_vault`) and `vhapi`. Those jars can't be
-redistributed, so you have to supply them yourself:
-
-1. Copy `the_vault-*.jar` and `vhapi-*.jar` from your Wold's Vaults instance's `mods` folder into `libs/`.
-2. Set `vault_jar` and `vhapi_jar` in `gradle.properties` to their exact file names.
-3. Run `./gradlew build` (or `gradlew.bat build` on Windows). The jar ends up in `build/libs/`.
-
 ## Contributing
 
-Issues and pull requests are welcome. Every PR is reviewed and merged by the maintainer, so please:
-
-- keep each PR to one change,
-- say how you tested it (in-game, and on which pack version),
-- open an issue first for anything big so we can agree on the approach.
+Feel free to contribute anything you'd like to the mod, but keep your changes reasonable and clearly explained. AI is allowed, but please try not to make it "AI slop", including removing excessive comments and the like. 
 
 ## License
 
