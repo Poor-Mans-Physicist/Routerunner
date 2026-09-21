@@ -13,22 +13,17 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Per-FRAME look sidecar for the run log. The {@code pos} stream samples at 20 Hz, which is far below the
- * rate a player actually turns at, so aim cost (the dominant per-chest overhead) cannot be measured from it.
- * This samples yaw/pitch on every render tick and hands one batched {@code look} line per client tick to
- * {@link RunLog}, keeping the log's line count at the tick rate while preserving frame-rate aim detail.
- *
- * <p>Samples are deduplicated: a frame is only buffered when the view moved more than {@link #ANGLE_EPS}
- * degrees on either axis since the last buffered sample AND at least {@link #MIN_GAP_MS} passed since it.
- * Both the render tick and the client tick run on the render thread, so the buffer needs no locking beyond
- * RunLog's own {@code synchronized}.
+ * Per-frame look sampler for the run log: buffers yaw/pitch on each render tick and hands one batched
+ * {@code look} line per client tick to {@link RunLog}. A frame is buffered only if the view moved more than
+ * {@link #ANGLE_EPS} degrees on either axis and at least {@link #MIN_GAP_MS} passed since the last sample.
+ * Render-thread only; the buffer is unsynchronized.
  */
 @Mod.EventBusSubscriber(modid = Routerunner.MOD_ID, value = Dist.CLIENT)
 public final class LookSampler {
     private static final Logger LOG = LogUtils.getLogger();
     /** Minimum movement on either axis (degrees) for a frame to be worth a sample. */
     private static final double ANGLE_EPS = 0.5;
-    /** Minimum wall-clock gap between two buffered samples (ms) — caps the stream at ~62 Hz. */
+    /** Minimum wall-clock gap between two buffered samples (ms); caps the stream at ~62 Hz. */
     private static final long MIN_GAP_MS = 16L;
     /** Hard cap per client tick; a frame rate this far above the tick rate means something is wrong. */
     private static final int MAX_SAMPLES = 400;

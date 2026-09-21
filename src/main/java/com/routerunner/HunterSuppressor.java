@@ -13,20 +13,15 @@ import java.lang.reflect.Field;
 import java.util.Map;
 
 /**
- * Optional suppression of the_vault's Hunter chest outlines (the yellow boxes), which clutter the route
- * overlay. We do NOT touch the ability or its data (the minimap chest markers stay) — we just clear the
- * client-side {@code HunterOutlineRenderer.POSITIONS} map it draws from, at HIGHEST render priority so
- * this runs before Hunter's own (normal-priority) render that frame; its render early-returns on an empty
- * map. Reflection + guarded, so it's a silent no-op if the_vault is absent or its internals change.
- *
- * <p>Toggled by {@link RouterunnerConfig#suppressHunter}. Turning it back off lets the boxes reappear on
- * Hunter's next scan (a second or two).
+ * Hides the_vault's Hunter chest outlines when {@link RouterunnerConfig#suppressHunter} is on, by clearing the
+ * client-side {@code HunterOutlineRenderer.POSITIONS} map (via reflection) at HIGHEST render priority, before
+ * Hunter's own render. The ability and minimap markers are untouched.
  */
 @Mod.EventBusSubscriber(modid = Routerunner.MOD_ID, value = Dist.CLIENT)
 public final class HunterSuppressor {
     private static final Logger LOG = LogUtils.getLogger();
-    private static boolean resolved = false;      // have we tried to locate the field yet?
-    private static Map<?, ?> positions = null;    // cached reference to HunterOutlineRenderer.POSITIONS (final, stable)
+    private static boolean resolved = false;
+    private static Map<?, ?> positions = null;
 
     @SubscribeEvent(priority = EventPriority.HIGHEST)
     public static void onRenderLevel(RenderLevelLastEvent event) {

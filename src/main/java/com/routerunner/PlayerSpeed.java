@@ -14,19 +14,11 @@ import java.util.Locale;
 import java.util.UUID;
 
 /**
- * Player movement-speed readouts for the cost model and for the adaptive weights.
+ * Player movement-speed readouts for the cost model, the adaptive weights and the run log.
  *
- * <p>The number that matters is {@link #attribute}: the player's ACTUAL current MOVEMENT_SPEED, every
- * transient included. Vault modifiers grant speed effects (Tailwind, Quickening, corrupted Speed) mid-run,
- * and the adaptive system has to see them to explain the trail it is measuring, so nothing is filtered out
- * of the live value. {@link #persistentAttribute} is the same attribute with the transients removed — kept
- * only so the log can tell "you swapped gear" apart from "a potion landed", never to hide a modifier.
- *
- * <p>Two things are NOT in the attribute at all and are read separately: {@link #entitySpeed} and
- * {@link #flyingSpeed}, the raw {@code LivingEntity} fields. The Zephyr charm
- * ({@code woldsvaults:zephyr_charm}, {@code AirMobilityItem}) writes those directly in {@code curioTick}
- * ({@code setSpeed(0.2F)}, {@code flyingSpeed = speed * 0.5F}) and never touches the attribute system, so
- * an attribute read cannot see it. {@link #realizedHorizontal} is what the player is actually doing.
+ * <p>{@link #attribute} is the live MOVEMENT_SPEED with every transient included; {@link #persistentAttribute}
+ * removes the transients. {@link #entitySpeed} and {@link #flyingSpeed} read the raw {@code LivingEntity}
+ * fields, which the Zephyr charm writes directly outside the attribute system.
  */
 public final class PlayerSpeed {
     private static final Logger LOGGER = LogUtils.getLogger();
@@ -39,12 +31,7 @@ public final class PlayerSpeed {
     /** {@code LivingEntity.SPEED_MODIFIER_SPRINTING_UUID} — "Sprinting speed boost", MULTIPLY_TOTAL +0.30. */
     private static final UUID VANILLA_SPRINT_UUID = UUID.fromString("662a6b8d-da3e-4c1c-8813-96ea6097278d");
 
-    /**
-     * ParCool's FastRun modifier. Its UUID is {@code UUID.randomUUID()} at class-init, so it can only be
-     * matched by name. ADDITION of {@code fast-run_modifier / 100} (pack config 2.0 → +0.02, i.e. x1.20 of
-     * the total), added server-side while FastRun is active — and FastRun forces {@code setSprinting(true)},
-     * so it is sprint, just faster.
-     */
+    /** ParCool's FastRun modifier name (an ADDITION modifier); its UUID is random, so it is matched by name. */
     private static final String PARCOOL_FAST_RUN = "parcool.modifier.fast_run";
 
     private static volatile boolean loggedAttributeFailure = false;
@@ -55,8 +42,7 @@ public final class PlayerSpeed {
     private PlayerSpeed() {}
 
     /**
-     * The player's actual current MOVEMENT_SPEED — gear, prestige, sprint, ParCool FastRun and every active
-     * mob effect included. This is what {@code Params.speedAttr} carries and what the adaptive system reads.
+     * The player's live MOVEMENT_SPEED, every modifier included ({@code Params.speedAttr}).
      *
      * @return the live attribute, or {@link #DEFAULT_ATTRIBUTE} (logged once) if it can't be read
      */
@@ -70,14 +56,8 @@ public final class PlayerSpeed {
     }
 
     /**
-     * The same attribute with vanilla's full formula — {@code (base + sum ADDITION) * (1 + sum MULTIPLY_BASE)
-     * * prod (1 + MULTIPLY_TOTAL)} — over the modifiers that are NOT tied to transient player state: the
-     * vanilla sprint modifier, ParCool's FastRun modifier and every {@code effect.*} modifier are left out.
-     * Gear and the prestige speed power (Swiftness Amplified, MULTIPLY_TOTAL, x1.25 in this pack) stay in.
-     *
-     * <p>Diagnostic only. It exists so the log can attribute a change to gear rather than to a potion; the
-     * exclusions are by identity, never by operation — filtering on {@code MULTIPLY_TOTAL} both misses
-     * ParCool (which is ADDITION) and deletes the permanent prestige multiplier.
+     * MOVEMENT_SPEED recomputed with vanilla's formula over the non-transient modifiers only (sprint, ParCool
+     * FastRun and {@code effect.*} excluded by identity, not by operation). Diagnostic only.
      *
      * @return the transient-free attribute, or the live attribute (logged once) if it can't be recomputed
      */
@@ -101,10 +81,8 @@ public final class PlayerSpeed {
     }
 
     /**
-     * Every transient modifier on MOVEMENT_SPEED right now, each rendered as a JSON object
-     * {@code {"n":name,"op":0|1|2,"a":amount}} — the mob effects (so a mid-vault Tailwind, Quickening or
-     * corrupted Speed is in the log the moment it lands), the vanilla sprint modifier and ParCool FastRun.
-     * Sorted, so the list doubles as a change signature. Empty when none apply.
+     * Every transient MOVEMENT_SPEED modifier (mob effects, vanilla sprint, ParCool FastRun) as a sorted list
+     * of JSON objects {@code {"n":name,"op":0|1|2,"a":amount}}. Empty when none apply.
      */
     public static List<String> transientModifiers(Player p) {
         try {
@@ -144,11 +122,7 @@ public final class PlayerSpeed {
         }
     }
 
-    /**
-     * {@code LivingEntity.getSpeed()} — the raw movement field, normally re-derived from the attribute each
-     * tick but overwritten outright by the Zephyr charm (0.2). Logged because it is the only attribute-free
-     * way to see that charm.
-     */
+    /** {@code LivingEntity.getSpeed()}, the raw movement field (overwritten by the Zephyr charm). */
     public static double entitySpeed(Player p) {
         try {
             return p == null ? 0.0 : p.getSpeed();

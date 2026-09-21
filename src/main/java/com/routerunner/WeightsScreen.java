@@ -11,10 +11,8 @@ import java.util.function.DoubleConsumer;
 import java.util.function.DoubleSupplier;
 
 /**
- * Live weight-tuning menu (the beta ask): every routing weight as a slider from 0 to 2x its tuned default (a fixed
- * cap for the two zero-default weights), grouped into category tabs so each slider gets a stable fixed position.
- * Sliders write straight to the live config; a change takes effect on the next room solved. Hover a slider for what
- * it does + its default. "Reset all" restores the tuned defaults. See NORTH_STAR.md — the only goal is chests/min.
+ * Live weight-tuning menu: every routing weight as a slider (0 to 2x its default, or a fixed cap), grouped into
+ * category tabs. Changes apply on the next room solve; "Reset all" restores the defaults.
  */
 public class WeightsScreen extends Screen {
     private static final String[] CATS = {"Bail", "Move", "Open", "Cluster", "Shafts", "Sprint"};
@@ -44,7 +42,6 @@ public class WeightsScreen extends Screen {
         int x0 = (this.width - contentW) / 2;
         int tabW = contentW / 4 - 2;
 
-        // tab row, 4 per row (currently 4 + 2), the active one greyed out so you can see where you are
         for (int i = 0; i < CATS.length; i++) {
             int row = i / 4;
             int col = i % 4;
@@ -56,7 +53,6 @@ public class WeightsScreen extends Screen {
             this.addRenderableWidget(tb);
         }
 
-        // sliders for this category, stacked
         int y = 78;
         for (WeightDef d : defs) {
             if (d.cat != tab) continue;
@@ -66,7 +62,6 @@ public class WeightsScreen extends Screen {
             y += 24;
         }
 
-        // bottom bar: the sliders, the measured layer on top of them, and out
         int third = (contentW - 8) / 3;
         int by = this.height - 28;
         this.addRenderableWidget(new Button(x0, by, third, 20,
@@ -80,9 +75,8 @@ public class WeightsScreen extends Screen {
                 new TextComponent("Done"), b -> this.onClose()));
     }
 
-    /** Reset must touch weights on every tab, not just the visible one — apply defaults straight through the setters. */
+    /** Throwaway sliders for every weight on every tab, bound to the live setters, so all can be reset. */
     private List<WeightSlider> allSliders() {
-        // Build throwaway sliders bound to the same setters so resetToDefault() writes each default to config.
         List<WeightSlider> all = new ArrayList<>();
         for (WeightDef d : defs) {
             all.add(new WeightSlider(0, 0, 10, 10, d.name, d.desc, d.min, d.max, d.def, d.isInt, d.get, d.set));
@@ -114,13 +108,12 @@ public class WeightsScreen extends Screen {
         return false;
     }
 
-    // ---- weight catalogue. Defaults are read from a FRESH config so they never drift from RouterunnerConfig;
-    //      max = 2x the default (def(...)), or a fixed cap for the zero-default weights (defMax(...)). ----
+    /** Builds the weight catalogue: sliders bind to the live config, defaults come from a fresh config. */
     private void buildDefs() {
         defs.clear();
-        RouterunnerConfig c = RouterunnerConfig.get();  // live values (getters/setters bind here)
-        RouterunnerConfig d = new RouterunnerConfig();   // tuned defaults (never mutated)
-        // Bail / throughput
+        RouterunnerConfig c = RouterunnerConfig.get();
+        RouterunnerConfig d = new RouterunnerConfig();
+        // Bail
         def(0, "Bail aggression", "Skim to the densest clusters; higher = fewer, richer stops (raises chests/min if hallways are cheap).", d.bailAggression, false, () -> c.bailAggression, v -> c.bailAggression = v);
         defMax(0, "Manual bail", "Absolute leave-threshold (chests per travel cost). 0 = auto (aggression x hot-spot rate).", 1.0, d.bail, false, () -> c.bail, v -> c.bail = v);
         // Movement
@@ -145,7 +138,7 @@ public class WeightsScreen extends Screen {
         def(3, "Proximity radius (open)", "Range of the proximity discount in wide-open space.", d.proximityRadiusOpen, false, () -> c.proximityRadiusOpen, v -> c.proximityRadiusOpen = v);
         def(3, "Above-path penalty", "Penalty per block a chest sits 3+ above the path (aim-up corner chests).", d.abovePathWeight, false, () -> c.abovePathWeight, v -> c.abovePathWeight = v);
         def(3, "Enclosure penalty", "Penalty for near-buried chests (5+ solid faces incl. other chests).", d.enclosureWeight, false, () -> c.enclosureWeight, v -> c.enclosureWeight = v);
-        // Shafts (the vertical trident-dash edges in the walk graph, plus what one dash costs)
+        // Shafts and trident dashes
         def(4, "Trident base cost", "Flat cost of one dash. Measured ~2.4s per shaft leg = ~40 open-walk blocks, so it only fires for a real vertical save.", d.tridentActionCost, false, () -> c.tridentActionCost, v -> c.tridentActionCost = v);
         def(4, "Trident dist weight", "Tiny per-block cost of a dash (distance is otherwise free).", d.tridentDistWeight, false, () -> c.tridentDistWeight, v -> c.tridentDistWeight = v);
         def(4, "Trident min dist", "Don't dash for hops shorter than this — just walk them.", d.tridentMinDist, false, () -> c.tridentMinDist, v -> c.tridentMinDist = v);
@@ -155,11 +148,11 @@ public class WeightsScreen extends Screen {
         def(4, "Shaft min saving (horiz)", "Minimum travel a shallow/horizontal shaft must save (a higher bar).", d.shaftMinSavingHoriz, false, () -> c.shaftMinSavingHoriz, v -> c.shaftMinSavingHoriz = v);
         def(4, "Shaft cap (vertical)", "Max vertical shafts kept per room.", d.shaftCapVertical, true, () -> c.shaftCapVertical, v -> c.shaftCapVertical = (int) v);
         defMax(4, "Shaft cap (horizontal)", "Max horizontal/shallow shafts kept (0 = off; they made tours teleport sideways).", 16, d.shaftCapHoriz, true, () -> c.shaftCapHoriz, v -> c.shaftCapHoriz = (int) v);
-        // Drops (walk off a ledge and fall) — the cheap alternative to a staircase or a downward dash
+        // Drops
         def(4, "Drop base cost", "Flat cost of committing to a fall. Near-free: you keep full speed either side of it.", d.dropActionCost, false, () -> c.dropActionCost, v -> c.dropActionCost = v);
         def(4, "Drop height weight", "Cost per sqrt(block) fallen (fall time). Higher = the route prefers stairs over big drops.", d.dropHeightWeight, false, () -> c.dropHeightWeight, v -> c.dropHeightWeight = v);
         def(4, "Drop max height", "Tallest fall the route will send you off. Below 4 = no drops at all (stairs and dashes only).", d.dropMaxHeight, true, () -> c.dropMaxHeight, v -> c.dropMaxHeight = (int) v);
-        // Sprint straight-shots (the cyan sprint-jump lines — sprint flat-out mining along a line; the fast dense-room tool)
+        // Sprint lines
         def(5, "Sprint cost", "Cost per block of a sprint line (open walk = 1.0). Measured 0.53. LOWER = the route leans on long sprint-jump lines more.", d.openSprintWeight, false, () -> c.openSprintWeight, v -> c.openSprintWeight = v);
         def(5, "Sprint min dist", "Shortest hop that becomes a sprint line. Lower = more (and shorter) sprint lines.", d.openSprintMinDist, false, () -> c.openSprintMinDist, v -> c.openSprintMinDist = v);
         def(5, "Sprint min clear", "Open space (walls only) both ends need for a sprint line. Lower = sprints fire in tighter spots.", d.openSprintMinClear, true, () -> c.openSprintMinClear, v -> c.openSprintMinClear = (int) v);

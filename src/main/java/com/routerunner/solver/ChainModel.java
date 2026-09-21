@@ -12,11 +12,9 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Deterministic chain-miner model (faithful port of {@code chain.rs}), instantiated per solve against the
- * player's ACTUAL Chain Miner tier: breaking one chest clears up to {@link #limit} same-type chests, each
- * within {@link #range} on every axis (Chebyshev), BFS/nearest-first. No RNG. A spatial hash (bucket size
- * {@code range + 1}) makes the neighbour query cheap; a ±1 bucket scan then covers every cell within
- * {@code range}, and {@link #bucketRadius(double)} widens that scan for larger query radii.
+ * Deterministic chain-miner model for the player's Chain Miner tier: breaking one chest clears up to
+ * {@link #limit} same-type chests, each within {@link #range} (Chebyshev) of a cleared one, BFS nearest-first.
+ * Neighbour queries use a spatial hash with bucket size {@code range + 1}.
  */
 public final class ChainModel {
     /** Chebyshev radius of one chain step (blocks). */
@@ -55,8 +53,8 @@ public final class ChainModel {
         return Math.floorDiv(v, bucket);
     }
 
+    /** Pack bucket coords into one key; the +64 offset keeps each field non-negative within 10 bits. */
     public long packBucket(int bx, int by, int bz) {
-        // local coords are small and >= -a few; +64 keeps every field non-negative within 10 bits.
         return (((long) (bx + 64)) << 20) | (((long) (by + 64)) << 10) | (long) (bz + 64);
     }
 
@@ -64,11 +62,7 @@ public final class ChainModel {
         return packBucket(bucketCoord(x), bucketCoord(y), bucketCoord(z));
     }
 
-    /**
-     * How many buckets a scan must span each way to be guaranteed to cover everything within {@code reach}
-     * blocks. A ±k scan covers distances up to {@code k * bucket}, so small chain tiers (small buckets) need
-     * a wider scan than the ±1 that a chain-step query gets away with.
-     */
+    /** Buckets a scan must span each way to cover everything within {@code reach} blocks (at least 1). */
     public int bucketRadius(double reach) {
         return Math.max(1, (int) Math.ceil(reach / bucket));
     }
@@ -83,7 +77,7 @@ public final class ChainModel {
 
     /** Indices j != idx with remaining[j] and within {@link #range} (Chebyshev) of pts[idx]. */
     public List<Integer> neighbors(int idx, boolean[] remaining) {
-        if (limit <= 1) return new ArrayList<>(); // a 1-block chain never reaches a neighbour
+        if (limit <= 1) return new ArrayList<>();
         List<Integer> out = new ArrayList<>();
         P c = pts.get(idx);
         int bx = bucketCoord(c.x()), by = bucketCoord(c.y()), bz = bucketCoord(c.z());
@@ -107,7 +101,7 @@ public final class ChainModel {
         return Math.min(neighbors(idx, remaining).size() + 1, limit);
     }
 
-    /** The exact set of chests one trigger at {@code start} removes (does NOT mutate remaining). */
+    /** The exact set of chests one trigger at {@code start} removes; does not mutate {@code remaining}. */
     public List<Integer> clearFrom(int start, boolean[] remaining) {
         if (limit <= 1) return new ArrayList<>(Collections.singletonList(start));
         List<Integer> trav = new ArrayList<>();

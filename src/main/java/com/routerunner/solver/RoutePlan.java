@@ -8,23 +8,27 @@ public final class RoutePlan {
     public List<WP> waypoints;
     /** Route polylines to draw: walk legs (floor paths), trident bursts, and open-space sprint straight-shots. */
     public List<Seg> segments;
-    /** The final leg — the routed path from the last stop to the exit gate (for exit guidance). */
+    /** The final leg: the routed path from the last stop to the exit gate. */
     public Seg exitLeg;
     /** Per-chest-index state: 'b' = break waypoint, 'c' = chain-cleared, 's' = skipped. */
     public char[] state;
     public int collected;
     public double walkBlocks;
-    public double flyBlocks; // total trident/dash burst distance (kept name for compatibility)
-    public double hotSpotRate; // top-quartile break marginal (chests per travel/aim cost) — the room's opportunity rate
+    /** Total trident/dash burst distance (blocks). */
+    public double flyBlocks;
+    /** Top-quartile break marginal (chests per unit travel/aim cost): the room's opportunity rate. */
+    public double hotSpotRate;
 
-    /** Continuous densified render path (local coords), entrance→exit, drawn from the player forward. */
+    /** Continuous densified render path (local coords), entrance to exit. */
     public List<P> path;
-    public char[] pathMode;     // per point: 'w' walk, 'd' drop (fall off a ledge), 't' trident, 's' sprint straight-shot, 'x' gap (don't draw)
-    public boolean[] pathWhite; // per point: edge i->i+1 is the final approach into a turnaround (render white)
+    /** Per point: 'w' walk, 'd' drop, 't' trident, 's' sprint straight-shot, 'x' gap (not drawn). */
+    public char[] pathMode;
+    /** Per point: edge i→i+1 is the final approach into a turnaround (rendered white). */
+    public boolean[] pathWhite;
     /** Walk graph retained from solving, so a from-player connector can be pathed cheaply at runtime. */
     public WalkGraph graph;
 
-    /** A route segment: 'w' walk floor path, 'd' drop (fall off a ledge), 't' trident burst, 's' sprint straight-shot, 'x' gap; with its polyline. */
+    /** A route segment and its polyline; mode is 'w' walk, 'd' drop, 't' trident, 's' sprint straight-shot or 'x' gap. */
     public static final class Seg {
         public final char mode;
         public final List<P> poly;
@@ -38,13 +42,18 @@ public final class RoutePlan {
     /** One waypoint: the chest to break, what the chain is expected to clear, and route bookkeeping. */
     public static final class WP {
         public final P pos;
-        public final int plannedCleared;   // chain-group size this trigger is expected to remove
-        public final char segMode;         // 'w', 'd' or 't' — mode of the route segment leading into it
-        public final double cumDist;       // cumulative planned route distance (blocks) at this waypoint
-        public final int pathIndex;        // index into RoutePlan.path where this chest sits (continuous render)
-        /** The route REVERSES here: you arrive, break, and leave back the way you came (see Params.turnaroundDeg). */
+        /** Chain-group size this break is expected to clear. */
+        public final int plannedCleared;
+        /** Mode of the route segment leading into this waypoint ('w', 'd' or 't'). */
+        public final char segMode;
+        /** Cumulative planned route distance at this waypoint (blocks). */
+        public final double cumDist;
+        /** Index into {@link RoutePlan#path} where this chest sits. */
+        public final int pathIndex;
+        /** The route reverses here: arrive, break, and leave back the way you came (see Params.turnaroundDeg). */
         public boolean turnaround = false;
-        public double outDirX = 0;         // unit horizontal direction the route LEAVES this waypoint in
+        /** Unit horizontal direction the route leaves this waypoint in. */
+        public double outDirX = 0;
         public double outDirZ = 0;
 
         public WP(P pos, int plannedCleared, char segMode, double cumDist, int pathIndex) {

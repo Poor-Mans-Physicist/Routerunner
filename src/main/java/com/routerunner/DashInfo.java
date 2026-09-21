@@ -11,9 +11,8 @@ import java.util.Optional;
 
 /**
  * Guarded the_vault accessor for the player's selected Dash specialization ({@code Dash_Base},
- * {@code Dash_Damage} or {@code Dash_Warp}). Logged with the weight snapshots so a run's
- * {@code teleport} records can be read against whether Warp was equipped: a Warp landing is an
- * expected discontinuity, anything else is a portal or a server correction.
+ * {@code Dash_Damage} or {@code Dash_Warp}), logged so {@code teleport} records can be read against
+ * whether Warp was equipped.
  */
 public final class DashInfo {
     private static final Logger LOGGER = LogUtils.getLogger();

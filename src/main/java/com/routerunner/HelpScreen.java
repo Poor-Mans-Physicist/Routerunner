@@ -9,14 +9,13 @@ import net.minecraft.util.FormattedCharSequence;
 import java.util.ArrayList;
 import java.util.List;
 
-/** A short, scrollable help panel explaining the three modes, the weights menu, and where the logs go. */
+/** Scrollable player-facing help: the route overlay, the weights menu, laps and the run logs. */
 public class HelpScreen extends Screen {
     private final Screen parent;
     private final List<FormattedCharSequence> lines = new ArrayList<>();
     private double scroll = 0;
     private int viewTop, viewBottom, textW, x0;
 
-    // Player-facing help (placeholder — will be replaced with the user's own copy). Keep it non-technical.
     private static final String[] PARAS = {
         "§eRouterunner§r draws the fastest chest-looting route through a room. Follow the coloured line and break chests as you pass — you don't have to chase every single one.",
         "",
@@ -56,7 +55,7 @@ public class HelpScreen extends Screen {
         lines.clear();
         for (String p : PARAS) {
             lines.addAll(this.font.split(new TextComponent(p), textW));
-            lines.add(FormattedCharSequence.EMPTY); // paragraph gap
+            lines.add(FormattedCharSequence.EMPTY);
         }
         this.addRenderableWidget(new Button(this.width / 2 - 100, this.height - 28, 200, 20,
                 new TextComponent("Back"), b -> this.onClose()));

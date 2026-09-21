@@ -4,21 +4,11 @@ import java.util.ArrayDeque;
 import java.util.Deque;
 
 /**
- * Tier-0 looting telemetry: total mined, plus three rate readouts.
+ * Looting telemetry: total chests mined plus net (wall-clock), active (unpaused) and sliding 1-minute rates.
  *
- *  - Net avg:    chests / total wall-clock minutes in the vault (INCLUDES pauses/breaks).
- *  - Active avg: chests / unpaused minutes (real looting efficiency).
- *  - 1m:         chests mined in the last 60s of active time.
- *
- * Clocks accumulate from vault ENTRY (not first mine) as durations, so they serialize cleanly
- * across a server restart. {@link #advanceClock(boolean)} is called every in-vault client tick;
- * net advances always, active only while not paused. Per-call deltas >1s (loading/freezes) are
- * dropped. "Paused" includes the Escape/pause screen being open (handled by the caller).
- *
- * <p>LAPS: the vault totals above are monotonic for the whole vault and only ever cleared by
- * {@link #reset()} (vault entry). "New Lap" ({@link #newLap()}) just moves the lap baselines, so the
- * HUD counters restart from zero while the vault clocks, the run log and the history summary keep
- * counting the whole vault.
+ * <p>Clocks accumulate from vault entry as durations; {@link #advanceClock(boolean)} runs every in-vault
+ * tick and drops per-call deltas over 1 s. Vault totals are cleared only by {@link #reset()};
+ * {@link #newLap()} moves the lap baselines the HUD counts from.
  */
 public class MetricsTracker {
     private static final MetricsTracker INSTANCE = new MetricsTracker();
@@ -28,15 +18,19 @@ public class MetricsTracker {
     private static final long MAX_TICK_DELTA_MS = 1_000L;
 
     private int total = 0;
-    private long netMs = 0L;      // accumulated wall-clock time in vault (incl. pauses)
-    private long activeMs = 0L;   // accumulated unpaused time in vault
+    /** Accumulated wall-clock time in the vault, pauses included. */
+    private long netMs = 0L;
+    /** Accumulated unpaused time in the vault. */
+    private long activeMs = 0L;
     private long lastRealMs = System.currentTimeMillis();
-    private final Deque<Long> recentMineActive = new ArrayDeque<>(); // active-clock stamp per recent mine
+    /** Active-clock stamp of each mine within the sliding window. */
+    private final Deque<Long> recentMineActive = new ArrayDeque<>();
 
-    private int lap = 1;                // current lap index (1-based); the vault clocks never restart with it
-    private int lapStartTotal = 0;      // chest total when this lap began
-    private long lapStartNetMs = 0L;    // net clock when this lap began
-    private long lapStartActiveMs = 0L; // active clock when this lap began
+    /** Current lap (1-based) and the chest total and clocks when it began. */
+    private int lap = 1;
+    private int lapStartTotal = 0;
+    private long lapStartNetMs = 0L;
+    private long lapStartActiveMs = 0L;
 
     public void advanceClock(boolean paused) {
         long now = System.currentTimeMillis();
@@ -80,11 +74,7 @@ public class MetricsTracker {
         return recentMineActive.size() * (60_000.0 / SLIDING_WINDOW_MS);
     }
 
-    /**
-     * Start a new lap: the HUD counters restart from this moment. The vault totals, both clocks and the
-     * run log are untouched — only the lap baselines move (and the 1m window is cleared so it doesn't
-     * carry the previous lap's mines).
-     */
+    /** Start a new lap: moves the lap baselines and clears the sliding window; vault totals are untouched. */
     public void newLap() {
         lap++;
         lapStartTotal = total;
@@ -111,7 +101,7 @@ public class MetricsTracker {
     private static double rate(int count, long elapsedMs) {
         if (count == 0) return 0.0;
         double min = elapsedMs / 60_000.0;
-        if (min < 1.0 / 60.0) min = 1.0 / 60.0; // floor at 1s to avoid an early spike
+        if (min < 1.0 / 60.0) min = 1.0 / 60.0;
         return count / min;
     }
 

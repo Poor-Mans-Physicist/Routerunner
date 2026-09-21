@@ -17,25 +17,19 @@ import java.util.List;
 import java.util.Locale;
 
 /**
- * Per-profile adaptive weights: the handful of solver weights that are pure MEASUREMENTS of how fast this
- * player moves, re-measured from their own trail and applied as a clamped multiplier on top of the sliders.
+ * Per-profile adaptive weights: six solver weights (tight/narrow/mid clearance multipliers, waypoint overhead,
+ * sprint per-block cost, drop height cost) re-measured from the player's own trail and applied as clamped
+ * multipliers on top of the sliders. A quantity is applied only once its accumulator has enough samples.
  *
- * <p>Nothing here copies WHERE the player went — only how fast they cover a block under each condition
- * (clearance band, sprint line, fall) and how long a stop costs. The solver then re-optimises against those
- * numbers. Six quantities are measured: the tight/narrow/mid clearance multipliers, the per-waypoint
- * overhead, the sprint per-block cost and the drop height cost. Each is confident only once its accumulator
- * has enough samples; until then the slider value is used untouched.
- *
- * <p>State lives in {@code config/routerunner/adaptive/<profileName>.json} and accumulates across vaults
- * with exponential forgetting (once an accumulator passes its cap, its count and sums are scaled back to the
- * cap, so recent play dominates). Every public entry point is synchronized: {@link #observeLeg} and
- * {@link #apply} run on the client tick, {@link #observeRoom} at room exit, {@link #save} also at teardown.
+ * <p>State lives in {@code config/routerunner/adaptive/<profileName>.json} and accumulates across vaults with
+ * exponential forgetting (past its cap, an accumulator is scaled back to the cap). Public entry points are
+ * synchronized.
  */
 public final class AdaptiveWeights {
     private static final Logger LOG = LogUtils.getLogger();
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
 
-    /** The v14 MEASURED defaults every adaptive quantity is expressed relative to (see RouterunnerConfig). */
+    /** Baseline values each adaptive quantity is expressed relative to (the slider defaults). */
     public static final double BASE_TIGHT = 3.9;
     public static final double BASE_NARROW = 1.6;
     public static final double BASE_MID = 1.2;
@@ -43,37 +37,44 @@ public final class AdaptiveWeights {
     public static final double BASE_SPRINT = 0.55;
     public static final double BASE_DROP = 4.0;
 
-    /** A measured/baseline ratio never moves a slider by more than this — a bad fit can't wreck the route. */
+    /** Clamp range for a measured/baseline multiplier. */
     private static final double MULT_MIN = 0.5;
     private static final double MULT_MAX = 2.0;
 
-    private static final double BIN_CAP = 6000;    // clearance-bin samples kept per bin
-    private static final double LEG_CAP = 400;     // walk legs kept for the overhead regression
-    private static final double SPRINT_CAP = 2000; // fast samples kept
-    private static final double DROP_CAP = 200;    // falls kept
+    /** Forgetting caps: effective sample counts each accumulator is scaled back to once exceeded. */
+    private static final double BIN_CAP = 6000;
+    private static final double LEG_CAP = 400;
+    private static final double SPRINT_CAP = 2000;
+    private static final double DROP_CAP = 200;
 
-    // Speed accumulators are HISTOGRAMS, because the baselines are medians over every moving sample
-    // (dashes included) — a running mean would not survive forgetting as the same statistic.
+    /** Clearance-bin histogram layout: 0-40 blk/s; faster samples land in the top bucket. */
     private static final double BIN_LO = 0.0, BIN_WIDTH = 0.25;
-    private static final int BIN_BUCKETS = 160;    // 0-40 blk/s; anything faster lands in the top bucket
+    private static final int BIN_BUCKETS = 160;
+    /** Sprint histogram layout: 25-80 blk/s. */
     private static final double SPRINT_LO = 25.0, SPRINT_WIDTH = 0.5;
-    private static final int SPRINT_BUCKETS = 110; // 25-80 blk/s
+    private static final int SPRINT_BUCKETS = 110;
 
-    private static final double BIN_MIN_N = 600;   // samples before a clearance bin is trusted
+    /** Minimum effective samples before each quantity is trusted. */
+    private static final double BIN_MIN_N = 600;
     private static final double LEG_MIN_N = 40;
     private static final double SPRINT_MIN_N = 300;
     private static final double DROP_MIN_N = 15;
 
-    private static final double DT_MIN_MS = 40;    // trail samples closer than this are the same instant
-    private static final double DT_MAX_MS = 300;   // ...and further apart than this straddle a pause/teleport
-    private static final double SPEED_MIN = 0.5;   // standing still tells us nothing about travel speed
-    private static final double SPRINT_SPEED = 25.0; // at/above this you're on a sprint line or a dash
-    private static final double FALL_SPEED = -8.0; // vertical blocks/s that counts as a committed fall
+    /** Trail sample pairs outside this gap (ms) are skipped: same instant, or a pause/teleport. */
+    private static final double DT_MIN_MS = 40;
+    private static final double DT_MAX_MS = 300;
+    /** Samples slower than this (blk/s) are ignored as standing still. */
+    private static final double SPEED_MIN = 0.5;
+    /** Samples at or above this (blk/s) feed the sprint accumulator. */
+    private static final double SPRINT_SPEED = 25.0;
+    /** Vertical speed (blk/s) at or below which a sample counts as falling. */
+    private static final double FALL_SPEED = -8.0;
     private static final double LEG_MIN_DIST = 1.0, LEG_MAX_DIST = 60.0;
     private static final double LEG_MIN_SEC = 0.1, LEG_MAX_SEC = 15.0;
 
     private static final int SAVE_EVERY_ROOMS = 10;
-    private static final double LOG_MULT_EPS = 0.02; // a multiplier must move >2 % to raise an `adapt` record
+    /** Relative change a multiplier needs to raise an {@code adapt} record. */
+    private static final double LOG_MULT_EPS = 0.02;
 
     private static volatile AdaptiveWeights instance;
 
@@ -98,12 +99,10 @@ public final class AdaptiveWeights {
         return a;
     }
 
-    // ---- application ----
-
     /**
      * Multiply the six adaptive weights on a freshly-built {@link RoutePlanner.Params} by their measured
-     * ratios. Called from {@link RouteService#buildParams} after every slider value has been copied in, so
-     * the sliders stay the source of truth and a non-confident quantity leaves its slider untouched.
+     * ratios. Called after every slider value has been copied in; a non-confident quantity leaves its
+     * slider value untouched.
      */
     public synchronized void apply(RoutePlanner.Params p, RouterunnerConfig cfg) {
         if (p == null || cfg == null || !cfg.adaptiveWeights) return;
@@ -137,12 +136,9 @@ public final class AdaptiveWeights {
         sb.append(String.format(Locale.ROOT, " %s×%.2f", tag, mult));
     }
 
-    // ---- observation ----
-
     /**
-     * Fold one finished room's trail into the clearance, sprint and drop accumulators. Called at room exit
-     * for BOTH routed and freehand rooms (the trail is the same either way), just before the room's diff is
-     * scored. Raises an {@code adapt} record when a multiplier moved, and saves every
+     * Fold one finished room's trail (routed or freehand) into the clearance, sprint and drop accumulators.
+     * Raises an {@code adapt} record when a multiplier moved, and saves every
      * {@link #SAVE_EVERY_ROOMS} rooms.
      */
     public synchronized void observeRoom(RouteService.SolvedRoute room) {
@@ -160,7 +156,7 @@ public final class AdaptiveWeights {
             for (int i = 1; i < trail.size(); i++) {
                 double[] a = trail.get(i - 1), b = trail.get(i);
                 double dtMs = b[3] - a[3];
-                boolean teleported = b.length > 6 && b[6] > 0; // the sample after a warp/portal jump: not travel
+                boolean teleported = b.length > 6 && b[6] > 0;
                 if (teleported || dtMs < DT_MIN_MS || dtMs > DT_MAX_MS) {
                     if (falling) commitFall(fallHeight, fallSec);
                     falling = false;
@@ -186,8 +182,6 @@ public final class AdaptiveWeights {
                 if (g == null) continue;
                 int clr = clearanceAt(g, b);
                 if (clr < 0) continue;
-                // Every MOVING sample goes in, dashes included: that is the population the baselines
-                // (4.3 / 10.2 / 14.2 / 16.7 blk/s) were measured over.
                 Hist bin = clr <= 1 ? st.tight : (clr <= 3 ? st.narrow : (clr <= 6 ? st.mid : st.open));
                 addSpeed(bin, speed, BIN_CAP);
             }
@@ -203,9 +197,8 @@ public final class AdaptiveWeights {
     }
 
     /**
-     * Fold one followed route leg into the walk regression (planned blocks vs seconds taken). Only plain
-     * WALK legs qualify — a trident/sprint/drop leg has its own cost model — and only legs inside the
-     * distance/duration window, so a leg the player wandered off mid-way doesn't become the intercept.
+     * Fold one followed route leg into the walk regression (planned blocks vs seconds taken). Only walk legs
+     * inside the distance/duration window count.
      */
     public synchronized void observeLeg(char mode, double plannedDist, long dtMs) {
         if (mode != 'w') return;
@@ -235,8 +228,6 @@ public final class AdaptiveWeights {
         if (x < 0 || y < 0 || z < 0 || x >= g.sx || y >= g.sy || z >= g.sz) return -1;
         return g.clearanceFlyAt(x, y, z);
     }
-
-    // ---- derived numbers ----
 
     /**
      * Every measured quantity, in the order
@@ -301,8 +292,8 @@ public final class AdaptiveWeights {
     }
 
     /**
-     * The histogram's median, linearly interpolated inside the bucket the half-mass point falls in (so the
-     * measurement doesn't quantise to the bucket width and jitter the multipliers). NaN when empty.
+     * The histogram's median, linearly interpolated inside the bucket holding the half-mass point. NaN when
+     * empty.
      */
     private static double median(Hist hist) {
         double t = total(hist);
@@ -376,8 +367,6 @@ public final class AdaptiveWeights {
                 Math.round(st.drops.n)};
     }
 
-    // ---- exponential forgetting: past the cap, scale counts and sums so recent play dominates ----
-
     private void forgetDrops() {
         if (st.drops.n <= DROP_CAP) return;
         double k = DROP_CAP / st.drops.n;
@@ -395,8 +384,6 @@ public final class AdaptiveWeights {
         st.legs.sxx *= k;
         st.legs.sxy *= k;
     }
-
-    // ---- persistence ----
 
     /** Folder holding one accumulator file per movement profile. */
     public static Path adaptiveDir() {
@@ -468,15 +455,11 @@ public final class AdaptiveWeights {
         return out.isEmpty() ? "default" : (out.length() > 48 ? out.substring(0, 48) : out);
     }
 
-    /**
-     * A float histogram of speeds. Fixed buckets so that FORGETTING (scaling every bucket) preserves the
-     * shape of the distribution and the median stays the median — the statistic the baselines were measured
-     * as. Counts are doubles because forgetting scales them.
-     */
+    /** A fixed-bucket speed histogram (blk/s); counts are doubles because forgetting scales them. */
     static final class Hist {
-        double lo;    // speed (blk/s) at bucket 0's lower edge
-        double width; // bucket width (blk/s)
-        double[] h;   // bucket counts
+        double lo;
+        double width;
+        double[] h;
 
         Hist() {}
 
@@ -516,9 +499,8 @@ public final class AdaptiveWeights {
         }
 
         /**
-         * Re-create anything a hand-edited, partial or PRE-HISTOGRAM file left out, so a stale file can't
-         * NPE the solver. A file written before the median change has no bucket arrays, so its clearance
-         * and sprint measurements start over; the leg and drop accumulators carry across unchanged.
+         * Re-create anything a partial or malformed file left out. Histograms with the wrong shape start over;
+         * the leg and drop accumulators are kept.
          */
         void fill(String profileName) {
             if (profile == null) profile = profileName;

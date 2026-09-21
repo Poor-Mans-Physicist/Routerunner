@@ -27,9 +27,8 @@ import java.util.Map;
 import java.util.stream.Stream;
 
 /**
- * THE run log: one JSONL file per vault at {@code config/routerunner/runs/vault_<stamp>_<vaultId>.jsonl},
- * replacing the old freehand_/routed_/run_/diff_ families. Schema (field names are contract — offline
- * tooling is written against them) lives in {@code research/RUN_LOG_SCHEMA.md}.
+ * The run log: one JSONL file per vault at {@code config/routerunner/runs/vault_<stamp>_<vaultId>.jsonl}.
+ * Field names are a contract; offline tooling reads them.
  *
  * <p>Every record carries {@code ev}, {@code ts} (wall clock) and {@code t} (the vault's ACTIVE clock,
  * monotonic for the whole vault — laps never reset it). A reconnect APPENDS to the existing file for the
@@ -42,11 +41,13 @@ import java.util.stream.Stream;
  */
 public final class RunLog {
     private static final Logger LOG = LogUtils.getLogger();
-    /** Run-log format version, stamped on vault_enter; 18 = solve timings, attack key, teleport records, dashSpec. */
+    /** Run-log format version, stamped on vault_enter. */
     public static final int LOG_VERSION = 18;
     private static final SimpleDateFormat FILE_FMT = new SimpleDateFormat("yyyyMMdd_HHmmss");
-    private static final int BUFFER_CAP = 3000;       // pre-vault-id events held in memory
-    private static final int POS_FLUSH_EVERY = 20;    // flush cadence for the pos stream (20 Hz -> ~1 s)
+    /** Maximum events buffered before the vault id resolves. */
+    private static final int BUFFER_CAP = 3000;
+    /** The pos stream flushes every this many records (~1 s at 20 Hz). */
+    private static final int POS_FLUSH_EVERY = 20;
 
     private static BufferedWriter writer = null;
     private static Path currentFile = null;
@@ -102,8 +103,6 @@ public final class RunLog {
         overflowLogged = false;
     }
 
-    // ---- events (one method per row of the schema table) ----
-
     /** First tick with a resolved vault id: stamps the profile, mod/weights version and the solver's weights. */
     public static synchronized void vaultEnter(String vaultId, int lap) {
         RouterunnerConfig cfg = RouterunnerConfig.get();
@@ -148,14 +147,11 @@ public final class RunLog {
     }
 
     /**
-     * MOVEMENT_SPEED. Logged on enter/resume/lap, whenever the PERSISTENT value moves >1 % (gear/prestige
-     * change) and immediately whenever the set of transient modifiers changes — so a Tailwind, Quickening or
-     * corrupted-Speed effect granted by a vault modifier mid-run lands in the log the tick it applies.
+     * MOVEMENT_SPEED sample. Logged on enter/resume/lap, when the persistent value moves more than 1 %, and on
+     * the tick the set of transient modifiers changes.
      *
-     * @param attr       the player's ACTUAL current speed: gear, prestige, sprint, ParCool FastRun and every
-     *                   active effect included. This is what {@code Params.speedAttr} carries
-     * @param persistent the same attribute with the transients removed (gear + prestige only) — diagnostic,
-     *                   so a change can be attributed to gear rather than to an effect
+     * @param attr       the player's actual current speed, all modifiers included ({@code Params.speedAttr})
+     * @param persistent the same attribute with transient modifiers removed (gear + prestige only)
      * @param sprint     whether the player was sprinting when this was sampled
      * @param fastRun    ParCool FastRun's ADDITION amount at the sample, 0 when not applied
      * @param entity     {@code LivingEntity.getSpeed()} — outside the attribute system; the Zephyr charm
@@ -497,10 +493,8 @@ public final class RunLog {
     }
 
     /**
-     * A FRESH solver weight snapshot, written a few seconds into the vault. {@code vault_enter}'s snapshot is
-     * taken on the first tick with a vault id, which is before the ability tree (chain-miner tier) and
-     * MOVEMENT_SPEED have synced to the client, so its {@code chainRange}/{@code chainLimit}/{@code speedAttr}
-     * are defaults rather than what the solver will actually run with.
+     * A fresh solver weight snapshot, written a few seconds into the vault once the ability tree and
+     * MOVEMENT_SPEED have synced; {@code vault_enter}'s snapshot may still carry defaults for those.
      *
      * @param weightsJson a {@code RoutePlanner.Params} dump (the same object {@code vault_enter} carries)
      */
@@ -576,8 +570,6 @@ public final class RunLog {
           .append("}\n");
         write(sb.toString(), true);
     }
-
-    // ---- plumbing ----
 
     private static StringBuilder head(String ev, int cap) {
         return new StringBuilder(cap)
@@ -681,7 +673,6 @@ public final class RunLog {
         return g.clearanceFlyAt(x, y, z);
     }
 
-    /** Every target chest present at solve time, room-local [x,y,z]. */
     /** The room's non-target chests and strongboxes, LOCAL, each with its block id: [[x,y,z,"id"],...]. */
     private static String otherChestList(RouteService.SolvedRoute sr) {
         if (sr.otherChestsLocal == null || sr.otherChestIds == null || sr.otherChestsLocal.size() != sr.otherChestIds.size()) {
@@ -698,6 +689,7 @@ public final class RunLog {
         return sb.append(']').toString();
     }
 
+    /** Every target chest present at solve time, room-local [x,y,z]. */
     private static String localChestList(RouteService.SolvedRoute sr) {
         StringBuilder sb = new StringBuilder(sr.targetsWorld.size() * 12 + 2).append('[');
         boolean first = true;

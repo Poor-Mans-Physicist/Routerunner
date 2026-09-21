@@ -32,7 +32,6 @@ public class RouterunnerConfigScreen extends Screen {
         top = topFor(rows, step);
         int lx = cx - 154, rx = cx + 4, bw = 150;
 
-        // left column — toggles
         int y = top;
         this.addRenderableWidget(new Button(lx, y, bw, 20, enabledLabel(), b -> {
             RouterunnerConfig cfg = RouterunnerConfig.get();
@@ -83,7 +82,6 @@ public class RouterunnerConfigScreen extends Screen {
             b.setMessage(arrowLabel());
         }));
 
-        // right column — actions
         y = top;
         this.addRenderableWidget(new Button(rx, y, bw, 20, new TextComponent("Edit HUD Layout"),
                 b -> this.minecraft.setScreen(new HudEditorScreen(this))));

@@ -15,11 +15,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 
-/**
- * Append-only history of completed vaults at config/routerunner/history.json. Uncapped — the file
- * is only read/written once per vault completion and once when the viewer opens, and each record
- * is tiny, so unbounded growth is not a practical performance concern.
- */
+/** Append-only, uncapped history of completed vaults at config/routerunner/history.json. */
 public final class HistoryStore {
     private static final Logger LOG = LogUtils.getLogger();
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();

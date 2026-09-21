@@ -15,33 +15,35 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Forge-bus client runtime. Owns the vault lifecycle: Routerunner only scans/tracks while in the
- * vault dimension. State resets on entry, is persisted periodically + on disconnect (resume on
- * reconnect), a summary is appended to history on a clean exit, and the temp file is then removed.
- * The whole vault is written to ONE {@link RunLog} file, opened once the vault id resolves and
- * closed on exit or disconnect.
+ * Forge-bus client runtime and vault lifecycle. Scanning and tracking run only in the vault dimension.
+ * State resets on entry, is persisted periodically and on disconnect (resumed on reconnect), and a summary
+ * is appended to history on a clean exit. The vault's {@link RunLog} file opens once the vault id resolves
+ * and closes on exit or disconnect.
  */
 @Mod.EventBusSubscriber(modid = Routerunner.MOD_ID, value = Dist.CLIENT)
 public class ClientEvents {
 
     private static final long SCAN_INTERVAL_MS = 500L;
     private static final long SAVE_INTERVAL_MS = 10_000L;
-    private static final double SPEED_LOG_FRACTION = 0.01;   // log the speed attribute on a >1 % change
-    private static final long SPEED_MIN_INTERVAL_MS = 2000L; // ...and never more often than this
-    private static final long WEIGHTS_SNAPSHOT_DELAY_MS = 5000L; // ability tree + speed have synced by now
+    /** Relative persistent-speed change that triggers a speed record. */
+    private static final double SPEED_LOG_FRACTION = 0.01;
+    /** Minimum gap between persistent-speed records. */
+    private static final long SPEED_MIN_INTERVAL_MS = 2000L;
+    /** Delay after the vault id resolves before the second weights snapshot is logged. */
+    private static final long WEIGHTS_SNAPSHOT_DELAY_MS = 5000L;
 
     private static boolean inVaultPrev = false;
     private static String loadedVaultId = null;
     private static long lastScanMs = 0L;
     private static long lastSaveMs = 0L;
     private static List<String> lastModifiers = new ArrayList<>();
-    private static List<String> loggedModifiers = new ArrayList<>(); // what the run log has already recorded
+    private static List<String> loggedModifiers = new ArrayList<>();
     private static boolean prevEnabled = true;
-    private static double lastSpeedBase = -1.0; // <0 = not logged yet this vault
+    private static double lastSpeedBase = -1.0;
     private static long lastSpeedMs = 0L;
-    private static String lastSpeedMods = null; // the transient-modifier signature at the last speed record
-    private static long vaultIdResolvedMs = 0L;         // when this vault's id came through
-    private static boolean loggedWeightsSnapshot = false; // the delayed `weights` record has gone out
+    private static String lastSpeedMods = null;
+    private static long vaultIdResolvedMs = 0L;
+    private static boolean loggedWeightsSnapshot = false;
 
     @SubscribeEvent
     public static void onClientTick(TickEvent.ClientTickEvent event) {
@@ -55,11 +57,10 @@ public class ClientEvents {
         ClientLevel level = mc.level;
         Player player = mc.player;
         if (level == null || player == null) {
-            // Disconnect / world unload: suspend (keep the temp file so we resume on reconnect).
             if (inVaultPrev) {
-                LookSampler.drainTo(); // whatever was buffered when the connection dropped
-                RouteService.reset(); // finalizes the room we were in, so its diff lands before the file closes
-                AdaptiveWeights.get().save(); // ...and persist what that room measured
+                LookSampler.drainTo();
+                RouteService.reset();
+                AdaptiveWeights.get().save();
                 RunLog.pause("suspend");
                 RunLog.close();
                 suspend();
@@ -71,16 +72,14 @@ public class ClientEvents {
 
         boolean inVault = isInVault(level);
         if (inVault && !inVaultPrev) {
-            // Entered a vault: start fresh; saved state (if any) is loaded once the id resolves.
             resetTrackers();
             clearVaultState();
             prevEnabled = RouterunnerConfig.get().enabled;
         } else if (!inVault && inVaultPrev) {
-            // Left a vault while still connected = finished/exited: close the log out, then clear.
-            LookSampler.drainTo(); // last frames of look detail, before the file closes
-            RouteService.reset();  // last room's diff
-            AdaptiveWeights.get().save(); // ...and its measurements
-            finalizeVault();       // history summary (whole-vault totals)
+            LookSampler.drainTo();
+            RouteService.reset();
+            AdaptiveWeights.get().save();
+            finalizeVault();
             logVaultExit();
             logBreakSources();
             RunLog.close();
@@ -91,7 +90,6 @@ public class ClientEvents {
         inVaultPrev = inVault;
         if (!inVault) return;
 
-        // Resolve the vault id and resume saved state once (a tick or two after entry).
         if (loadedVaultId == null) {
             String vid = safeVaultId();
             if (vid != null) {
@@ -102,7 +100,7 @@ public class ClientEvents {
                 boolean resumedLog = RunLog.open(vid);
                 if (resumedLog) {
                     RunLog.resume("reconnect");
-                    loggedModifiers = new ArrayList<>(lastModifiers); // the existing file already has them
+                    loggedModifiers = new ArrayList<>(lastModifiers);
                 } else {
                     RunLog.vaultEnter(vid, MetricsTracker.get().getLap());
                 }
@@ -112,8 +110,8 @@ public class ClientEvents {
 
         RouterunnerConfig cfg = RouterunnerConfig.get();
         if (prevEnabled && !cfg.enabled) {
-            LookSampler.drainTo();    // sampling stops with the pause; don't strand the last frames
-            RunLog.pause("disabled"); // clocks freeze from here — being disabled IS the pause
+            LookSampler.drainTo();
+            RunLog.pause("disabled");
         } else if (!prevEnabled && cfg.enabled) {
             RunLog.resume("enabled");
             logSpeed(player);
@@ -124,9 +122,9 @@ public class ClientEvents {
         boolean paused = mc.isPaused() || (mc.screen instanceof PauseScreen);
         MetricsTracker.get().advanceClock(paused);
 
-        TeleportDetector.update(player); // position discontinuities, before anything reads this tick's movement
-        RunLog.pos(player);      // one record per client tick (20 Hz)
-        LookSampler.drainTo();   // this tick's per-frame look samples, as one batched record
+        TeleportDetector.update(player);
+        RunLog.pos(player);
+        LookSampler.drainTo();
         if (loadedVaultId != null) checkSpeedChange(player);
         if (loadedVaultId != null && !loggedWeightsSnapshot
                 && System.currentTimeMillis() - vaultIdResolvedMs >= WEIGHTS_SNAPSHOT_DELAY_MS) {
@@ -135,7 +133,7 @@ public class ClientEvents {
         }
 
         try {
-            ChestScanner.tickCheck(level, player.blockPosition()); // tick-exact breaks near the player
+            ChestScanner.tickCheck(level, player.blockPosition());
         } catch (Exception e) {
             LogUtils.getLogger().error("[Routerunner] per-tick chest check failed", e);
         }
@@ -170,7 +168,7 @@ public class ClientEvents {
     private static void finalizeVault() {
         try {
             MetricsTracker m = MetricsTracker.get();
-            if (m.getTotal() <= 0) return; // skip empty/aborted runs
+            if (m.getTotal() <= 0) return;
             VaultSummary s = new VaultSummary();
             s.timestamp = System.currentTimeMillis();
             String type = LootListener.get().getResolvedType();
@@ -188,7 +186,7 @@ public class ClientEvents {
         }
     }
 
-    /** The closing {@code vault_exit} record — whole-vault totals, written before the file is closed. */
+    /** Writes the closing {@code vault_exit} record with whole-vault totals. */
     private static void logVaultExit() {
         try {
             MetricsTracker m = MetricsTracker.get();
@@ -201,16 +199,15 @@ public class ClientEvents {
         }
     }
 
-    /** How the vault's chest breaks were caught — confirms the per-tick check is doing the work, not the 500 ms scan. */
+    /** Logs how many of the vault's chest breaks came from the per-tick check versus the periodic scan. */
     private static void logBreakSources() {
         LogUtils.getLogger().info("[Routerunner] chest breaks this vault: {} tick-exact (tickCheck), {} from the 500 ms scan.",
                 ChestScanner.tickCheckBreaks(), ChestScanner.scanBreaks());
     }
 
     /**
-     * A second weight snapshot, {@link #WEIGHTS_SNAPSHOT_DELAY_MS} after the vault id resolves. The
-     * {@code vault_enter} snapshot is taken on the tick the id arrives, which is before the ability tree
-     * (chain-miner tier) and MOVEMENT_SPEED have synced — so it records defaults, not what the solver runs with.
+     * Logs a second weight snapshot {@link #WEIGHTS_SNAPSHOT_DELAY_MS} after the vault id resolves, once the
+     * ability tree and MOVEMENT_SPEED have synced.
      */
     private static void logWeightsSnapshot() {
         try {
@@ -252,7 +249,7 @@ public class ClientEvents {
         if (!isInVault(mc.level)) return 0;
         MetricsTracker m = MetricsTracker.get();
         m.newLap();
-        LootListener.get().reset(); // loot rates are per lap too
+        LootListener.get().reset();
         RunLog.lap(m.getLap(), m.getTotal(), m.getActiveMs());
         logSpeed(mc.player);
         if (loadedVaultId != null) RunPersistence.save(loadedVaultId, lastModifiers);
@@ -282,11 +279,7 @@ public class ClientEvents {
         lastSpeedMs = System.currentTimeMillis();
     }
 
-    /**
-     * Which transient modifiers are applied, ignoring their amounts — sprint and ParCool FastRun toggle
-     * constantly and are already in the 20 Hz {@code pos} stream, so they are deliberately NOT part of the
-     * signature; an effect landing or expiring is.
-     */
+    /** Signature of the applied transient modifiers, excluding sprint and ParCool FastRun. */
     private static String modSignature(java.util.List<String> mods) {
         StringBuilder sb = new StringBuilder(64);
         for (String m : mods) {
@@ -297,15 +290,8 @@ public class ClientEvents {
     }
 
     /**
-     * Two triggers. An EFFECT appearing or expiring (a vault modifier granting Tailwind, a Quickening proc,
-     * corrupted Speed) is logged immediately and unthrottled — the adaptive system has to see it to explain
-     * the trail it is measuring. A change in the PERSISTENT value (gear/prestige) over 1 % is logged at most
-     * once every {@link #SPEED_MIN_INTERVAL_MS}.
-     *
-     * <p>Sprint and ParCool FastRun are excluded from the trigger, not from the record: they toggle several
-     * times a second and change-detecting them fired ~350 speed events a vault, while {@code pos.sprint} and
-     * {@code pos.spd} already carry that state at 20 Hz. Every record still logs the full live {@code attr}
-     * and the complete transient breakdown.
+     * Logs a speed record immediately when the transient-modifier signature changes, and at most once every
+     * {@link #SPEED_MIN_INTERVAL_MS} when the persistent value moves more than 1 %.
      */
     private static void checkSpeedChange(Player player) {
         String mods = modSignature(PlayerSpeed.transientModifiers(player));

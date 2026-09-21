@@ -16,10 +16,8 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Makes the running vault metrics robust to disconnects/server restarts. A snapshot is written
- * periodically (and on suspend) to config/routerunner/current_vault.json, keyed by the vault id;
- * on re-entry the saved state is restored only if the ids match. The file is deleted on a clean
- * vault exit so the next vault starts fresh.
+ * Persists the running vault's metrics and loot state to config/routerunner/current_vault.json, keyed by
+ * vault id, so they survive a disconnect. Restored on re-entry only if the ids match; deleted on a clean exit.
  */
 public final class RunPersistence {
     private static final Logger LOG = LogUtils.getLogger();
@@ -69,7 +67,7 @@ public final class RunPersistence {
         if (!Files.exists(p)) return null;
         try (Reader r = Files.newBufferedReader(p)) {
             Snapshot s = GSON.fromJson(r, Snapshot.class);
-            if (s == null || !vaultId.equals(s.vaultId)) return null; // stale or a different vault
+            if (s == null || !vaultId.equals(s.vaultId)) return null;
             MetricsTracker.get().restore(s.total, s.netMs, s.activeMs,
                     s.lap, s.lapStartTotal, s.lapStartNetMs, s.lapStartActiveMs);
             LootListener.get().restore(s.resolvedType, s.engaged, s.lootStartNet, s.lootStartActive,

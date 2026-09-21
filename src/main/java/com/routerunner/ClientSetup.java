@@ -16,8 +16,6 @@ public class ClientSetup {
         event.enqueueWork(() -> ClientRegistry.registerKeyBinding(KeyBindings.OPEN_MENU));
         OverlayRegistry.registerOverlayTop("Routerunner HUD", RouterunnerHud.INSTANCE);
 
-        // Hook the_vault's pickup event (backpack-safe). Guarded so Routerunner still loads if
-        // the_vault is somehow absent (the VaultPickupHook class is only loaded inside the guard).
         if (net.minecraftforge.fml.ModList.get().isLoaded("the_vault")) {
             try {
                 VaultPickupHook.init();

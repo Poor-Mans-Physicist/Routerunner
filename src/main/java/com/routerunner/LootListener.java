@@ -14,11 +14,10 @@ import java.util.Map;
 
 /**
  * Per-vault loot tracking for the four chest types. Pickups are fed in by {@link VaultPickupHook}
- * (which owns all the_vault references); this class is the_vault-free and keys on item-id strings.
+ * (which owns all the_vault references); this class keys on item-id strings.
  *
- * Item rates use the same accumulated clocks as the chest metrics, measured from the moment loot
- * tracking "engages" (immediately for a manual type, or after 100 mined chests in AUTO). The
- * engagement offsets + per-item totals serialize so tracking survives a server restart.
+ * <p>Item rates use the chest metrics' clocks, measured from when tracking engages (immediately for a
+ * manual type, after 100 mined chests in AUTO). Engagement offsets and per-item totals are persisted.
  */
 public class LootListener {
     private static final long WINDOW_MS = 60_000L;
@@ -37,8 +36,9 @@ public class LootListener {
 
     private String resolvedType = null;
     private boolean engaged = false;
-    private long lootStartNet = 0L;      // MetricsTracker netMs at engagement
-    private long lootStartActive = 0L;   // MetricsTracker activeMs at engagement
+    /** MetricsTracker net/active clock values at engagement. */
+    private long lootStartNet = 0L;
+    private long lootStartActive = 0L;
 
     private final Map<String, Integer> autoCounts = new HashMap<>();
     private int autoSampled = 0;
@@ -47,7 +47,8 @@ public class LootListener {
 
     private static class Tracker {
         long total = 0;
-        final Deque<long[]> recent = new ArrayDeque<>(); // {activeMs stamp, qty}
+        /** Sliding-window entries: {activeMs stamp, qty}. */
+        final Deque<long[]> recent = new ArrayDeque<>();
         ItemStack sprite = ItemStack.EMPTY;
     }
 
@@ -113,8 +114,6 @@ public class LootListener {
         while (!t.recent.isEmpty() && t.recent.peekFirst()[0] < cutoff) t.recent.pollFirst();
     }
 
-    // ---- rendering accessors ----
-
     public boolean isActive() {
         return engaged && resolvedType != null
                 && RouterunnerConfig.get().trackedChest != RouterunnerConfig.TrackedChest.ALL;
@@ -162,8 +161,6 @@ public class LootListener {
         return count / min;
     }
 
-    // ---- persistence ----
-
     public boolean isEngaged() { return engaged; }
     public long getLootStartNet() { return lootStartNet; }
     public long getLootStartActive() { return lootStartActive; }
@@ -198,8 +195,6 @@ public class LootListener {
             }
         }
     }
-
-    // ---- helpers ----
 
     public static List<String> itemsFor(String type) {
         return ITEMS.getOrDefault(type, List.of());

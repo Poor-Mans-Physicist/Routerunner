@@ -5,19 +5,19 @@ import java.util.Arrays;
 import java.util.Deque;
 
 /**
- * A binary solidity voxel grid over a room cell, in LOCAL coordinates [0,sx)×[0,sy)×[0,sz).
- * Two predicates (per the beta spec §3.1):
- *   - isSolid:    blocks the player; INCLUDES target chests (you stand on them) — used by the walk graph.
- *   - isSolidFly: isSolid minus target-chest cells (you fly straight through a target chest line) — used by flight.
- * Out-of-bounds reads return solid (the room is walled), which bounds the walk graph and flight LOS.
+ * Binary solidity voxel grid over a room cell, in local coordinates [0,sx)×[0,sy)×[0,sz).
+ * {@code isSolid} includes target chests (walk graph); {@code isSolidFly} excludes them (flight lines).
+ * Out-of-bounds reads return solid.
  */
 public final class SolidGrid {
-    public static final int MAX_CLEARANCE = 12; // raised so a ~20+ wide chamber reads as "very open" (speed bonus)
+    /** Cap on baked horizontal clearance (blocks). */
+    public static final int MAX_CLEARANCE = 12;
 
     public final int sx, sy, sz;
     private final boolean[] solid;
     private final boolean[] target;
-    private byte[] clearanceFly; // horizontal blocks to nearest WALL (chests excluded) — the only clearance used
+    /** Horizontal blocks to the nearest wall (target chests excluded); null until baked. */
+    private byte[] clearanceFly;
 
     public SolidGrid(int sx, int sy, int sz) {
         this.sx = sx;
@@ -48,10 +48,6 @@ public final class SolidGrid {
         return solid[idx(x, y, z)];
     }
 
-    public boolean isSolid(P p) {
-        return isSolid(p.x(), p.y(), p.z());
-    }
-
     public boolean isSolidFly(int x, int y, int z) {
         if (!inBounds(x, y, z)) return true;
         int i = idx(x, y, z);
@@ -63,16 +59,14 @@ public final class SolidGrid {
     }
 
     /**
-     * Bake per-cell horizontal clearance = distance (blocks) to the nearest WALL within the same
-     * y-layer, via a per-layer multi-source BFS from solid cells, capped at {@link #MAX_CLEARANCE}.
-     * Horizontal-only so the floor directly below doesn't make every walkable cell read as "tight."
-     * Target chests are excluded: reaching into a dense chest cluster is fast, not "tight."
+     * Bake per-cell horizontal clearance: distance (blocks) to the nearest wall in the same y-layer,
+     * capped at {@link #MAX_CLEARANCE}. Horizontal-only so the floor below doesn't count; target chests excluded.
      */
     public void bakeClearance() {
         clearanceFly = bake();
     }
 
-    /** Per-y-layer multi-source BFS from WALL cells (target chests excluded), capped. */
+    /** Per-y-layer multi-source BFS from wall cells (target chests excluded), capped. */
     private byte[] bake() {
         byte[] field = new byte[sx * sy * sz];
         Arrays.fill(field, (byte) MAX_CLEARANCE);
@@ -108,9 +102,8 @@ public final class SolidGrid {
     }
 
     /**
-     * Cells a chest could occupy: a non-wall cell (target chests count as open) sitting directly on a
-     * wall cell, over the whole slab from y = 1. This is the decorator_add placement rule minus the
-     * sturdy-floor test the grid cannot see; water is open here, and chests do spawn in water.
+     * Number of cells a chest could occupy: a non-wall cell (target chests count as open) directly on a wall
+     * cell, from y = 1. Approximates the decorator placement rule without its sturdy-floor test.
      */
     public int slotCount() {
         int n = 0;
@@ -124,7 +117,7 @@ public final class SolidGrid {
         return n;
     }
 
-    /** Wall-only clearance (chests excluded) for a standing body (min of the feet and head layers). 0 if not baked/oob. */
+    /** Wall-only clearance for a standing body (min of feet and head layers); 0 if not baked or out of bounds. */
     public int clearanceFlyAt(int x, int y, int z) {
         return clearanceOf(clearanceFly, x, y, z);
     }

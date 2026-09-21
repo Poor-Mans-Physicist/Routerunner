@@ -17,26 +17,16 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Live, client-side chest detection. Mirrors the_vault's server-side HunterAbility.forEachTile
- * but runs against the ClientLevel: iterate loaded chunks' block entities and match vault chest
- * blocks by registry id (so we don't compile-depend on the_vault).
- *
- * "Mined" is detected as a tracked chest position transitioning to a non-chest block while its
- * chunk is still loaded (i.e. broken), per the Phase-0 spec.
+ * Client-side chest detection: iterates loaded chunks' block entities and matches vault chest blocks by
+ * registry id. A tracked chest counts as mined when its position becomes a non-chest block while its chunk
+ * is still loaded.
  */
 public class ChestScanner {
 
-    // Discovery window: +/-4 chunks around the player's chunk = a 9x9 chunk square
-    // (~144 blocks across, full height) -- a superset of a radius-4 circle, comfortably larger
-    // than a 47^3 room. This only governs DISCOVERY of chests; the mined-detection pass below
-    // catches any already-tracked chest breaking anywhere still loaded, even outside this window.
+    /** Chunk radius around the player searched for new chests; mined detection covers all tracked chests. */
     private static final int SCAN_CHUNK_RADIUS = 4;
 
-    /**
-     * Chebyshev radius around the player checked by {@link #tickCheck(Level, BlockPos)} every client tick.
-     * 48 covers a whole 47-block room from any corner, so a chain-mine anywhere in the room you are in is
-     * timestamped on the tick it happens instead of at the next 500 ms discovery scan.
-     */
+    /** Chebyshev radius (blocks) around the player checked by {@link #tickCheck(Level, BlockPos)} every tick. */
     private static final int TICK_CHECK_RADIUS = 48;
 
     /** Vault chest blocks matched by registry id. */
@@ -50,7 +40,7 @@ public class ChestScanner {
         for (String n : names) CHEST_IDS.add("the_vault:" + n);
     }
 
-    /** Chests seen this vault/level: position -> chest id (kept for future per-tier metrics). */
+    /** Chests seen this vault: position to chest block id. */
     private static final Map<BlockPos, String> tracked = new HashMap<>();
 
     private static int tickCheckBreaks = 0;
@@ -67,16 +57,12 @@ public class ChestScanner {
         scanBreaks = 0;
     }
 
-    public static int trackedCount() {
-        return tracked.size();
-    }
-
-    /** Breaks caught by the per-tick near check this vault (the tick-exact ones). */
+    /** Breaks caught by the per-tick near check this vault. */
     public static int tickCheckBreaks() {
         return tickCheckBreaks;
     }
 
-    /** Breaks caught only by the 500 ms discovery scan this vault (out of tick-check range, or a late chunk). */
+    /** Breaks caught only by the periodic discovery scan this vault. */
     public static int scanBreaks() {
         return scanBreaks;
     }
@@ -98,15 +84,13 @@ public class ChestScanner {
             }
         }
 
-        // Register newly-seen chests.
         tracked.putAll(current);
 
-        // Count broken chests: tracked positions that are still loaded but no longer a chest.
         int mined = 0;
         Iterator<Map.Entry<BlockPos, String>> it = tracked.entrySet().iterator();
         while (it.hasNext()) {
             Map.Entry<BlockPos, String> entry = it.next();
-            if (current.containsKey(entry.getKey())) continue; // still present within scan radius
+            if (current.containsKey(entry.getKey())) continue;
             if (checkMined(level, entry.getKey(), entry.getValue(), it)) mined++;
         }
 
@@ -117,10 +101,8 @@ public class ChestScanner {
     }
 
     /**
-     * Per-tick mined check over the tracked chests near the player, so a break lands on the tick it happens
-     * (~50 ms, the server's own resolution) instead of being quantised to the 500 ms discovery {@link #scan}.
-     * Only chests within {@link #TICK_CHECK_RADIUS} (Chebyshev) are inspected; everything else is left to the
-     * scan, which still sweeps the whole tracked map.
+     * Per-tick mined check over tracked chests within {@link #TICK_CHECK_RADIUS} of the player, so breaks are
+     * timestamped on the tick they happen; the rest are left to {@link #scan}.
      */
     public static void tickCheck(Level level, BlockPos playerPos) {
         if (level == null || playerPos == null || tracked.isEmpty()) return;
@@ -143,20 +125,19 @@ public class ChestScanner {
     }
 
     /**
-     * Mined-detection for one tracked chest, shared by {@link #scan} and {@link #tickCheck}: an unloaded chunk
-     * drops the entry silently (not a mine), a loaded position that is no longer a chest is a break (loot,
-     * run log, route service) and is dropped, anything else stays tracked.
+     * Mined detection for one tracked chest: an unloaded position is dropped without counting, a loaded
+     * position that is no longer a chest is reported as a break and dropped, anything else stays tracked.
      *
      * @return true iff this position was counted as a break
      */
     private static boolean checkMined(Level level, BlockPos pos, String chestId,
                                       Iterator<Map.Entry<BlockPos, String>> it) {
-        if (!level.isLoaded(pos)) {                 // chunk unloaded -> not a mine; drop
+        if (!level.isLoaded(pos)) {
             it.remove();
             return false;
         }
         BlockState state = level.getBlockState(pos);
-        if (isChest(state.getBlock())) return false; // still a chest -> keep tracking
+        if (isChest(state.getBlock())) return false;
         LootListener.get().onMinedChest(chestId);
         RunLog.breakEvent(pos, chestId);
         RouteService.onChestBroken(pos);

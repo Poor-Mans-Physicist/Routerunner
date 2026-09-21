@@ -11,9 +11,8 @@ import java.util.function.DoubleConsumer;
 import java.util.function.DoubleSupplier;
 
 /**
- * One labelled slider for a single routing weight, spanning {@code min}..{@code max} (max is 2x the tuned default,
- * or a sensible fixed cap for weights whose default is 0). Writes straight to the live config via the setter, so
- * changes take effect on the next room solve. Carries a hover tooltip (what it does + its default + range).
+ * A labelled slider for one routing weight over {@code min}..{@code max}. Writes to the live config through the
+ * setter, so changes apply on the next room solve, and provides a hover tooltip with description, default and range.
  */
 public class WeightSlider extends AbstractSliderButton {
     private final String name, desc;
@@ -63,7 +62,7 @@ public class WeightSlider extends AbstractSliderButton {
     public List<Component> tooltip() {
         List<Component> t = new ArrayList<>();
         t.add(new TextComponent(name));
-        for (String line : wrap(desc, 46)) t.add(new TextComponent("§7" + line)); // grey body
+        for (String line : wrap(desc, 46)) t.add(new TextComponent("§7" + line));
         t.add(new TextComponent("§8default " + fmt(def) + "  •  range 0-" + fmt(max)));
         return t;
     }

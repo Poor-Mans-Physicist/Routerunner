@@ -3,7 +3,6 @@ package com.routerunner;
 import com.routerunner.solver.P;
 import com.routerunner.solver.SolidGrid;
 import net.minecraft.core.BlockPos;
-import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.LevelChunk;
@@ -17,33 +16,35 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Builds the solver's per-room snapshot from the LIVE client world, ON THE MAIN THREAD (Minecraft
- * block reads aren't thread-safe). Everything downstream ({@link com.routerunner.solver.RoutePlanner})
- * runs off-thread on the returned, Minecraft-free {@link Snapshot}.
- *
- * Cell math is the verified grid layout: a 47³ cell anchored at world (regionX·47, _, regionZ·47).
- * The vertical extent is data-driven from the target chests (so we don't depend on the exact vault
- * y-origin). Entrance/exit are detected geometrically as the wall-centre air openings — no per-template
- * gate table and no rotation/mirror transform needed (the four wall-centres are rotation-invariant).
+ * Builds the solver's per-room {@link Snapshot} from the live client world. Must run on the main thread
+ * (block reads aren't thread-safe); the returned snapshot is Minecraft-free and safe to solve off-thread.
+ * A room is a 47³ cell at world (regionX·47, _, regionZ·47); its vertical extent is derived from the target
+ * chests, and entrance/exit are the air openings at the wall centres.
  */
 public final class RoomGeometry {
 
     public static final int CELL = 47;
-    private static final int PAD_BELOW = 4;   // floor headroom under the lowest chest
-    private static final int PAD_ABOVE = 5;   // head/flight room above the highest chest
-    private static final int MAX_HEIGHT = 64; // clamp the snapshot height
+    /** Blocks of grid below the lowest target chest. */
+    private static final int PAD_BELOW = 4;
+    /** Blocks of grid above the highest target chest. */
+    private static final int PAD_ABOVE = 5;
+    /** Max snapshot height (blocks). */
+    private static final int MAX_HEIGHT = 64;
 
     /** Minecraft-free result handed to the off-thread solver. */
     public static final class Snapshot {
         public final SolidGrid grid;
         public final List<P> targetsLocal;
-        public final List<BlockPos> targetsWorld; // parallel to targetsLocal, for live gone-checks/logging
-        /** Every chest-like block entity in the cell that is NOT a target (other chest types and strongboxes), LOCAL. */
+        /** World positions, parallel to {@link #targetsLocal}. */
+        public final List<BlockPos> targetsWorld;
+        /** Every non-target chest-like block entity in the cell (other chest types, strongboxes), local coords. */
         public final List<P> othersLocal;
-        public final List<String> otherIds; // parallel to othersLocal: full block id
+        /** Full block ids, parallel to {@link #othersLocal}. */
+        public final List<String> otherIds;
         public final P entranceLocal;
         public final P exitLocal;
-        public final int ox, oy, oz; // world origin of local (0,0,0)
+        /** World origin of local (0,0,0). */
+        public final int ox, oy, oz;
 
         Snapshot(SolidGrid grid, List<P> tl, List<BlockPos> tw, List<P> ol, List<String> oi,
                  P entrance, P exit, int ox, int oy, int oz) {
@@ -61,15 +62,13 @@ public final class RoomGeometry {
     }
 
     /**
-     * @return a snapshot, or {@code null} if the cell's chunks aren't all loaded yet (incomplete —
-     *         caller should wait and retry). A snapshot with an empty {@code targetsLocal} means the
-     *         cell has no target chests (nothing to route).
+     * Snapshot the cell, or {@code null} if its chunks aren't all loaded yet (retry later). An empty
+     * {@code targetsLocal} means the cell has no target chests. Main thread only.
      */
     public static Snapshot build(Level level, int regionX, int regionZ, String targetSubstring, BlockPos playerPos) {
         int ox = regionX * CELL;
         int oz = regionZ * CELL;
 
-        // Completeness gate: every chunk overlapping the cell must be loaded.
         int cx0 = ox >> 4, cx1 = (ox + CELL - 1) >> 4;
         int cz0 = oz >> 4, cz1 = (oz + CELL - 1) >> 4;
         for (int cx = cx0; cx <= cx1; cx++) {
@@ -78,7 +77,6 @@ public final class RoomGeometry {
             }
         }
 
-        // Collect target chests within the cell footprint.
         List<BlockPos> targetsWorld = new ArrayList<>();
         List<BlockPos> othersWorld = new ArrayList<>();
         List<String> otherIds = new ArrayList<>();
@@ -107,7 +105,6 @@ public final class RoomGeometry {
         int oy;
         int sy;
         if (targetsWorld.isEmpty()) {
-            // No targets — return an empty snapshot so the caller can mark "nothing to route".
             return new Snapshot(new SolidGrid(CELL, 1, CELL), new ArrayList<>(), new ArrayList<>(),
                     new ArrayList<>(), new ArrayList<>(), new P(0, 0, 0), new P(0, 0, 0), ox, level.getMinBuildHeight(), oz);
         }
@@ -133,18 +130,18 @@ public final class RoomGeometry {
             targetsLocal.add(new P(lx, ly, lz));
             grid.setTarget(lx, ly, lz);
         }
-        grid.bakeClearance(); // openness field for the execution-difficulty cost model
+        grid.bakeClearance();
 
-        // Gates: the four wall-centre air openings. Entrance = nearest the player; exit = opposite wall.
-        List<int[]> gates = new ArrayList<>(); // {localX, localY, localZ, wall} wall: 0=W,1=E,2=N,3=S
-        addGate(gates, grid, 0, 23, 1, 23, 0);    // West wall plane x=0, interior x=1
-        addGate(gates, grid, CELL - 1, 23, CELL - 2, 23, 1); // East
-        addGate(gates, grid, 23, 0, 23, 1, 2);    // North wall plane z=0, interior z=1
-        addGate(gates, grid, 23, CELL - 1, 23, CELL - 2, 3); // South
+        // entrance = gate nearest the player; exit = opposite wall's gate
+        List<int[]> gates = new ArrayList<>(); // {localX, localY, localZ, wall}; wall 0=W, 1=E, 2=N, 3=S
+        addGate(gates, grid, 0, 23, 1, 23, 0);
+        addGate(gates, grid, CELL - 1, 23, CELL - 2, 23, 1);
+        addGate(gates, grid, 23, 0, 23, 1, 2);
+        addGate(gates, grid, 23, CELL - 1, 23, CELL - 2, 3);
 
         P entrance, exit;
         if (gates.isEmpty()) {
-            // No detectable doorway: route from the player's position back to itself.
+            // no doorway detected: route from the player's position back to itself
             P pl = new P(clamp(playerPos.getX() - ox, CELL), clamp(playerPos.getY() - oy, sy), clamp(playerPos.getZ() - oz, CELL));
             entrance = pl;
             exit = pl;
@@ -164,7 +161,7 @@ public final class RoomGeometry {
             int oppWall = oppositeWall(ent[3]);
             int[] ex = null;
             for (int[] g : gates) if (g[3] == oppWall) ex = g;
-            if (ex == null) { // no opposite gate: pick the farthest from the entrance, else entrance itself
+            if (ex == null) { // no opposite gate: farthest from the entrance, else the entrance itself
                 long fd = -1;
                 for (int[] g : gates) {
                     if (g == ent) continue;
@@ -184,6 +181,7 @@ public final class RoomGeometry {
         return new Snapshot(grid, targetsLocal, targetsWorld, othersLocal, otherIds, entrance, exit, ox, oy, oz);
     }
 
+    /** Vault chest type substrings, in the index order used by {@link #scanCounts}. */
     public static final String[] TYPES = {"gilded", "ornate", "living", "wooden"};
 
     /** Per-type target-chest counts in the cell (indexes match {@link #TYPES}), or null if chunks incomplete. */
@@ -213,35 +211,7 @@ public final class RoomGeometry {
         return counts;
     }
 
-    /** Most common vault-chest type in the cell (by block id substring), or null if none/incomplete. */
-    public static String dominantType(Level level, int regionX, int regionZ) {
-        int ox = regionX * CELL, oz = regionZ * CELL;
-        int cx0 = ox >> 4, cx1 = (ox + CELL - 1) >> 4, cz0 = oz >> 4, cz1 = (oz + CELL - 1) >> 4;
-        for (int cx = cx0; cx <= cx1; cx++) {
-            for (int cz = cz0; cz <= cz1; cz++) {
-                if (!level.getChunkSource().hasChunk(cx, cz)) return null;
-            }
-        }
-        int[] counts = new int[TYPES.length];
-        for (int cx = cx0; cx <= cx1; cx++) {
-            for (int cz = cz0; cz <= cz1; cz++) {
-                LevelChunk chunk = level.getChunk(cx, cz);
-                for (Map.Entry<BlockPos, BlockEntity> e : chunk.getBlockEntities().entrySet()) {
-                    BlockPos p = e.getKey();
-                    if (p.getX() < ox || p.getX() >= ox + CELL || p.getZ() < oz || p.getZ() >= oz + CELL) continue;
-                    ResourceLocation id = ForgeRegistries.BLOCKS.getKey(e.getValue().getBlockState().getBlock());
-                    if (id == null) continue;
-                    String s = id.toString();
-                    if (s.contains("strongbox")) continue;
-                    for (int i = 0; i < TYPES.length; i++) if (s.contains(TYPES[i])) counts[i]++;
-                }
-            }
-        }
-        int best = -1, bestN = 0;
-        for (int i = 0; i < counts.length; i++) if (counts[i] > bestN) { bestN = counts[i]; best = i; }
-        return best < 0 ? null : TYPES[best];
-    }
-
+    /** Add the interior cell beside the middle of the tallest (2+ high) air run in this wall-centre column. */
     private static void addGate(List<int[]> out, SolidGrid g, int wallX, int wallZ, int interiorX, int interiorZ, int wall) {
         int bestStart = -1, bestLen = 0, curStart = -1, curLen = 0;
         for (int y = 0; y < g.sy; y++) {
@@ -253,7 +223,7 @@ public final class RoomGeometry {
                 curLen = 0;
             }
         }
-        if (bestLen < 2) return; // no real opening on this wall
+        if (bestLen < 2) return;
         int gy = bestStart + bestLen / 2;
         out.add(new int[]{interiorX, gy, interiorZ, wall});
     }

@@ -14,9 +14,8 @@ import java.util.Map;
 import java.util.UUID;
 
 /**
- * Guarded the_vault accessor for client-side vault metadata. Only classloaded from in-vault code
- * paths (the_vault is guaranteed present in the vault dimension). Keeps the rest of the mod free
- * of a hard the_vault dependency.
+ * the_vault accessor for client-side vault metadata. Only classloaded from in-vault code paths, so the rest
+ * of the mod has no hard the_vault dependency.
  */
 public final class VaultInfo {
 
@@ -27,12 +26,7 @@ public final class VaultInfo {
                 .orElse(null);
     }
 
-    /** Whether the vault is flagged finished (client-synced Vault.FINISHED). */
-    public static boolean isFinished() {
-        return ClientVaults.getActive().map(v -> v.has(Vault.FINISHED)).orElse(false);
-    }
-
-    /** Displayed crystal modifiers as "Nx Name" strings (includes bonus/cascade), newest run state. */
+    /** Displayed crystal modifiers as "Nx Name" strings, bonus/cascade included. */
     public static List<String> getModifierSummary() {
         return ClientVaults.getActive().map(v -> {
             List<String> out = new ArrayList<>();
@@ -48,10 +42,8 @@ public final class VaultInfo {
     }
 
     /**
-     * Room template id at the given grid-region index for the local player, or null. Mirrors the
-     * client minimap's read-chain: ClientVaults → Vault.STATS → StatsCollector.get(uuid) →
-     * StatCollector.ROOMS_DISCOVERED, keyed by BlockPos(regionX, 0, regionZ). The room is only
-     * present once it's been discovered (entered), which is exactly when we want to route it.
+     * Room template id at the given grid-region index from the player's discovered rooms (the minimap's
+     * source), or null until the room has been entered.
      */
     public static String getRoomIdAt(int regionX, int regionZ, UUID playerId) {
         return ClientVaults.getActive().map(v -> {

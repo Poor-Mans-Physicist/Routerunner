@@ -6,19 +6,14 @@ import net.minecraft.world.phys.Vec3;
 import org.slf4j.Logger;
 
 /**
- * Detects a position DISCONTINUITY on the local player: the position moved between two consecutive client
- * ticks by far more than that tick's own velocity explains. That is what a Dash Warp landing, a vault portal
- * or a server-side correction looks like from the client, and none of them is travel — a 12-block warp in
- * one tick would otherwise read as 240 blk/s and land in the top bucket of every speed histogram.
- *
- * <p>Runs once per client tick BEFORE the {@code pos} record and the trail capture, so both can carry the
- * flag; raises a {@code teleport} record and tells {@link RouteService#noteTeleport()} so the reach leg and
- * the adaptive accumulators exclude it. A dash or a riptide never qualifies: their displacement matches
- * their velocity.
+ * Detects a position discontinuity on the local player: a one-tick displacement far larger than that tick's
+ * velocity explains (Dash Warp landing, portal, server correction). Dashes and riptides never qualify because
+ * their displacement matches their velocity. On detection it writes a {@code teleport} record and calls
+ * {@link RouteService#noteTeleport()}. Must run each client tick before the {@code pos} record and trail capture.
  */
 public final class TeleportDetector {
     private static final Logger LOG = LogUtils.getLogger();
-    /** Smallest one-tick displacement that can be a teleport (blocks). Riptide peaks near 3.7 blk/tick but carries a matching velocity. */
+    /** Smallest one-tick displacement that can be a teleport (blocks). */
     static final double MIN_JUMP = 3.0;
     /** The displacement must exceed this multiple of the tick's own velocity (blocks per tick). */
     static final double VEL_FACTOR = 3.0;

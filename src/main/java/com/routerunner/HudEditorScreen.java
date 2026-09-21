@@ -79,7 +79,6 @@ public class HudEditorScreen extends Screen {
                 new TextComponent("Drag to move · toggle visibility below · Done to save"),
                 this.width / 2, 8, 0xA0A0A0);
 
-        // stat elements
         for (RouterunnerConfig.HudElementId id : RouterunnerConfig.HudElementId.values()) {
             RouterunnerConfig.ElementConfig ec = RouterunnerConfig.get().element(id);
             String text = RouterunnerHud.textFor(id, m);
@@ -89,7 +88,6 @@ public class HudEditorScreen extends Screen {
             font.drawShadow(poseStack, text, ec.x, ec.y, ec.visible ? 0xFFFFFF : 0x808080);
         }
 
-        // loot panel (positionable even when not engaged; uses a gilded preview if unresolved)
         RouterunnerConfig cfg = RouterunnerConfig.get();
         if (cfg.trackedChest != RouterunnerConfig.TrackedChest.ALL) {
             int[] lb = lootBox();

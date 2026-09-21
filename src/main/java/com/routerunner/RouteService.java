@@ -19,32 +19,45 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * Orchestrates per-room route solving and following. Detects the player's grid cell (and the room a
- * hallway leads to) via the verified checkerboard layout, solves once the cell's chunks are fully
- * loaded (so a partial/misleading route is never shown), runs the solver off the main thread, then
- * advances a follow-cursor and feeds the logger as the player mines. One room at a time.
+ * Orchestrates per-room route solving and following, one room at a time. Picks the player's cell (or the
+ * cell a hallway leads into), snapshots it once its chunks are loaded, solves off the main thread, then
+ * advances the follow cursor as chests break and feeds the run log, adaptive weights and diff scorer.
+ * Called on the client thread except where noted.
  */
 public final class RouteService {
     private static final Logger LOG = LogUtils.getLogger();
     private static final long NO_CELL = Long.MIN_VALUE;
-    private static final double AREA_R = 7.0; // radius (blocks) of a waypoint's "area"; cleared here = advance past it
-    private static final int STUCK_TICKS = 100; // ~5s of no local progress → give up on an unreachable leftover
-    private static final int FORWARD_SKIP_WINDOW = 6;   // how many waypoints ahead we look for forward progress
-    private static final int FORWARD_SKIP_MIN = 3;      // need at least this many ahead to judge
-    private static final double FORWARD_SKIP_FRAC = 0.65; // if this fraction ahead is already clear, skip the straggler
-    private static final double AREA_DONE_FRAC = 0.85;  // a waypoint whose original cluster is >=85% gone is "done" — kill it
-    // ---- path continuer (see #maybeSkipMissed): when a waypoint has been FLOWN PAST, drop it and carry on to the
-    // plan's next one. Every constant here exists to make it fire rarely — it must never trigger on an approach.
-    private static final double MISSED_MIN_SPEED = 2.0;      // blk/s: below this you're manoeuvring, not flying past
-    private static final int MISSED_ANGLE_DEG = 125;         // how far off the momentum heading counts as "behind you"
+    /** Radius (blocks) of a waypoint's area. */
+    private static final double AREA_R = 7.0;
+    /** Ticks without progress in the current area before the waypoint is abandoned. */
+    private static final int STUCK_TICKS = 100;
+    /** Waypoints ahead inspected by the forward-progress skip. */
+    private static final int FORWARD_SKIP_WINDOW = 6;
+    /** Minimum waypoints ahead needed for the forward-progress skip to judge. */
+    private static final int FORWARD_SKIP_MIN = 3;
+    /** Fraction of waypoints ahead already clear that triggers the forward-progress skip. */
+    private static final double FORWARD_SKIP_FRAC = 0.65;
+    /** Fraction of a waypoint's original cluster gone at which it counts as done. */
+    private static final double AREA_DONE_FRAC = 0.85;
+    /** Min horizontal speed (blk/s) for the missed-waypoint rule. */
+    private static final double MISSED_MIN_SPEED = 2.0;
+    /** Angle off the momentum heading (degrees) beyond which a waypoint is behind the player. */
+    private static final int MISSED_ANGLE_DEG = 125;
     private static final double MISSED_ANGLE_COS = Math.cos(Math.toRadians(MISSED_ANGLE_DEG));
-    private static final long MISSED_RECEDE_MS = 300;        // ...and it must have been getting FURTHER away this long
-    private static final long MISSED_BREAK_QUIET_MS = 300;   // ...with no chest broken since (you're still working it)
-    private static final double MISSED_GONE_FRAC = 0.25;     // a full, untouched cluster is never "missed" — go back for it
-    private static final double RECEDE_EPS = 1.0e-3;         // distance growth that counts as receding (blocks)
-    private static final double MOMENTUM_MIN = 0.05;         // blocks/tick below which there is no momentum heading
-    private static final double SPENT_GONE_FRAC = 0.5;       // trigger gone + this much of the cluster gone = not worth the detour
-    private static final long SKIP_COOLDOWN_MS = 2000;       // shared rate limit: one missed/spent skip per this window
+    /** How long (active ms) the waypoint must have been receding. */
+    private static final long MISSED_RECEDE_MS = 300;
+    /** How long (active ms) since the last tracked break. */
+    private static final long MISSED_BREAK_QUIET_MS = 300;
+    /** Below this cluster-gone fraction, a waypoint whose trigger still stands is never skipped as missed. */
+    private static final double MISSED_GONE_FRAC = 0.25;
+    /** Distance growth (blocks) that counts as receding. */
+    private static final double RECEDE_EPS = 1.0e-3;
+    /** Horizontal speed (blocks/tick) below which there is no momentum heading. */
+    private static final double MOMENTUM_MIN = 0.05;
+    /** Trigger gone plus this cluster-gone fraction marks a waypoint as spent. */
+    private static final double SPENT_GONE_FRAC = 0.5;
+    /** Shared rate limit (active ms) for missed and spent skips. */
+    private static final long SKIP_COOLDOWN_MS = 2000;
 
     private static final ExecutorService SOLVER = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "routerunner-solver");
@@ -52,25 +65,31 @@ public final class RouteService {
         return t;
     });
 
-    private static final long STATE_LOG_MIN_MS = 1000; // at most one `state` record a second
-    private static final int ACC_MIN_MATCHES = 4;      // fewer matched waypoints than this and accuracy is meaningless
-    private static final double ACC_MATCH_R = 2.0;     // a break this close to a planned waypoint counts as that waypoint
-    private static final double ACC_SPATIAL_SCALE = 3.0; // avg deviation (blocks) at which the spatial term hits 0
+    /** Minimum interval between {@code state} records (ms). */
+    private static final long STATE_LOG_MIN_MS = 1000;
+    /** Minimum matched waypoints for a route-accuracy score. */
+    private static final int ACC_MIN_MATCHES = 4;
+    /** Max distance (blocks) for a break to match a planned waypoint. */
+    private static final double ACC_MATCH_R = 2.0;
+    /** Average follow deviation (blocks) at which the spatial accuracy term reaches 0. */
+    private static final double ACC_SPATIAL_SCALE = 3.0;
 
-    private static volatile SolvedRoute current = null; // the displayed route, or null
-    private static volatile long solvingCell = NO_CELL;  // cell currently being solved (in-flight)
-    private static volatile boolean awaitingChunks = false; // near a cell but it isn't fully loaded yet
-    private static volatile String lastState = "idle"; // human-readable status for the HUD readout
-    private static volatile String lastLoggedState = null; // the state the run log last recorded
+    /** The active route, or null. */
+    private static volatile SolvedRoute current = null;
+    /** Cell key of the in-flight solve, or NO_CELL. */
+    private static volatile long solvingCell = NO_CELL;
+    /** Status line for the HUD. */
+    private static volatile String lastState = "idle";
+    private static volatile String lastLoggedState = null;
     private static long lastStateLogMs = 0;
-    private static volatile int lastAccuracyPct = -1; // route-accuracy score of the last ROUTED room, -1 = none yet
+    /** Route-accuracy score (0-100) of the last routed room, or -1. */
+    private static volatile int lastAccuracyPct = -1;
 
     public static SolvedRoute current() { return current; }
-    public static boolean isSolving() { return solvingCell != NO_CELL; }
 
     /**
-     * A position discontinuity this tick (see {@link TeleportDetector}): flag it on the live room so the next
-     * trail sample, the current reach leg and the adaptive accumulators all know this movement was not travel.
+     * Flag a position discontinuity (see {@link TeleportDetector}) on the live room so the next trail sample
+     * and the current reach leg are not treated as travel.
      */
     public static void noteTeleport() {
         SolvedRoute sr = current;
@@ -78,16 +97,12 @@ public final class RouteService {
         sr.tpSinceWp++;
         sr.tpSinceCapture = true;
     }
-    public static boolean isAwaitingChunks() { return awaitingChunks; }
     public static String debugState() { return lastState; }
 
     /** Route-accuracy score (0-100) of the last routed room scored this vault, or -1 if there isn't one. */
     public static int lastAccuracyPct() { return lastAccuracyPct; }
 
-    /**
-     * Set the HUD status line and record the change as a {@code state} event. Throttled to one record a
-     * second: the routing states carry the cursor position, so they change every waypoint.
-     */
+    /** Set the HUD status line and record a change as a {@code state} event (at most one per second). */
     private static void setState(String state) {
         lastState = state;
         if (state.equals(lastLoggedState)) return;
@@ -98,20 +113,16 @@ public final class RouteService {
         RunLog.state(state);
     }
 
+    /** Vault entry/exit: flush the last room to the adaptive weights and diff, then clear all route and session state. */
     public static void reset() {
         if (measuredRoom != null) {
-            AdaptiveWeights.get().observeRoom(measuredRoom); // the last room still counts towards the measurements
-            finalizeRoomForDiff(measuredRoom);               // don't lose the last room's diff on vault exit
+            AdaptiveWeights.get().observeRoom(measuredRoom);
+            finalizeRoomForDiff(measuredRoom);
         }
         lastAccuracyPct = -1;
         current = null;
         solvingCell = NO_CELL;
-        awaitingChunks = false;
         setState("idle");
-        // new vault = new session: forget the dynamic-bail learning
-        sessionChests = 0;
-        sessionBlocks = 0;
-        roomsMeasured = 0;
         sessionHotSpotSum = 0;
         roomsForHotSpot = 0;
         pendingHallwayBlocks = 0;
@@ -120,6 +131,7 @@ public final class RouteService {
         measuredCellKey = NO_CELL;
     }
 
+    /** Per-client-tick entry point; exceptions are logged and swallowed. */
     public static void onClientTick(Level level, Player player) {
         try {
             tick(level, player);
@@ -130,8 +142,7 @@ public final class RouteService {
 
     private static void tick(Level level, Player player) {
         RouterunnerConfig cfg = RouterunnerConfig.get();
-        // Solve when routing is shown, diff mode is on, or the adaptive weights are learning (the last two
-        // compute the route but keep it hidden — the renderer gates on routingEnabled alone). All off = no compute.
+        // diff mode and adaptive weights need a solved route even when routing is hidden
         if (!cfg.routingEnabled && !cfg.diffRoute && !cfg.adaptiveWeights) {
             if (current != null) reset();
             return;
@@ -141,9 +152,7 @@ public final class RouteService {
         int rx = Math.floorDiv(pp.getX(), RoomGeometry.CELL);
         int rz = Math.floorDiv(pp.getZ(), RoomGeometry.CELL);
 
-        // Choose the cell to route: the one you're standing in if it has target chests, otherwise the
-        // cell you're heading into (hallway pre-solve). No grid-parity assumption — a "room" is just a
-        // cell that contains target chests; tunnels/gaps have none and yield no route.
+        // route the player's cell if it has target chests, else the cell they're heading into
         int chosenRx = rx, chosenRz = rz;
         int[] counts = RoomGeometry.scanCounts(level, rx, rz);
         boolean playerInRoom = counts != null && total(counts) > 0;
@@ -161,20 +170,16 @@ public final class RouteService {
         }
 
         if (counts == null) {
-            awaitingChunks = true;
             setState("loading room…");
             return;
         }
         if (total(counts) == 0) {
-            awaitingChunks = false;
             setState("no target chests nearby");
-            return; // keep any current route showing (e.g. while leaving through a tunnel)
+            return; // keep any current route showing
         }
-        awaitingChunks = false;
 
         long cellKey = (((long) chosenRx) << 32) ^ (chosenRz & 0xFFFFFFFFL);
 
-        // Skip-list (labyrinth, no-mine rooms): never route these.
         String roomId = safeRoomId(chosenRx, chosenRz, player);
         if (roomId != null && isSkipped(cfg, roomId)) {
             if (current != null && current.cellKey == cellKey) current = null;
@@ -185,11 +190,9 @@ public final class RouteService {
         SolvedRoute cur = current;
         if (cur != null && cur.cellKey == cellKey) {
             if (cur.roomId == null && roomId != null) {
-                cur.roomId = roomId;            // label logs once the room resolves
-                RunLog.roomId(cellKey, roomId); // ...and record it: room_solve already went out with a null id
+                cur.roomId = roomId;
+                RunLog.roomId(cellKey, roomId);
             }
-            // Record YOUR path (even if the route is hidden): the diff scores it, and the adaptive weights
-            // measure their speeds off it, so either consumer being on is reason enough to capture.
             if (cfg.diffRoute || cfg.adaptiveWeights) captureTrail(level, cur, player);
             if (cfg.routingEnabled) {
                 advance(level, player, cur);
@@ -197,7 +200,7 @@ public final class RouteService {
                 String suffix = cur.cursor >= wpTotal ? "done → EXIT" : (Math.min(cur.cursor + 1, wpTotal) + "/" + wpTotal);
                 setState("route " + suffix + " [" + cur.targetType + "]");
             } else {
-                setState("diff tracking [" + cur.targetType + "]"); // diff-only: solved but hidden, tracking you
+                setState("diff tracking [" + cur.targetType + "]");
             }
             return;
         }
@@ -212,7 +215,6 @@ public final class RouteService {
         RoomGeometry.Snapshot snap = RoomGeometry.build(level, chosenRx, chosenRz, targetType, pp);
         final long fGeomMs = (System.nanoTime() - geomStartNs) / 1_000_000L;
         if (snap == null) {
-            awaitingChunks = true;
             setState("loading room…");
             return;
         }
@@ -238,7 +240,7 @@ public final class RouteService {
                 sr.geomMs = fGeomMs;
                 sr.queueMs = (startNs - submitNs) / 1_000_000L;
                 sr.solveMs = (doneNs - startNs) / 1_000_000L;
-                sr.areaTotal = areaTotals(sr); // baseline cluster size per waypoint (all chests present at solve time)
+                sr.areaTotal = areaTotals(sr);
                 sr.startActiveMs = MetricsTracker.get().getActiveMs();
                 sr.lastWpActiveMs = sr.startActiveMs;
                 current = sr;
@@ -257,13 +259,10 @@ public final class RouteService {
     }
 
     /**
-     * Advance the follow-cursor with COVERAGE awareness. A waypoint is "done" only once its whole AREA is
-     * cleared (not merely its trigger chest), so one bad mine that consumes a few clustered triggers can't
-     * make us skip a section that still has chests. When the cursor lands on a waypoint whose trigger was
-     * consumed but whose area isn't clear, we aim at the nearest remaining chest there
-     * ({@link SolvedRoute#retargetPos}) so nothing gets abandoned — unless that cluster is already SPENT, in
-     * which case the waypoint is dropped and the cursor continues to the plan's next one. The plan itself is
-     * never reordered: every rule here can only discard the waypoint in front of you.
+     * Advance the follow cursor. A waypoint is done when its area is (mostly) cleared or only a straggler
+     * remains; otherwise it may be skipped as missed, forward-passed, stuck or spent. If its trigger is gone
+     * but its cluster isn't, {@link SolvedRoute#retargetPos} aims at the nearest leftover. The plan is never
+     * reordered; only the waypoint at the cursor can be discarded.
      */
     private static void advance(Level level, Player player, SolvedRoute sr) {
         int size = sr.plan.waypoints.size();
@@ -271,8 +270,6 @@ public final class RouteService {
 
         long activeMs = MetricsTracker.get().getActiveMs();
         int goneNow = countGone(level, sr);
-        // Advance past any waypoint that's DONE — fully clear, >=85% of its original cluster already gone, or down
-        // to a mop-up straggler (kills dead/near-dead waypoints so we don't backtrack for one or two leftovers).
         while (sr.cursor < size) {
             boolean cleared = areaMostlyClear(level, sr, sr.cursor);
             if (!cleared && !stragglerDone(level, sr, sr.cursor)) break;
@@ -283,11 +280,9 @@ public final class RouteService {
 
         RoutePlan.WP cw = sr.plan.waypoints.get(sr.cursor);
 
-        // Path continuer: you flew past this one and it is receding behind you — drop it, take the next.
         if (RouterunnerConfig.get().missedSkip && maybeSkipMissed(level, player, sr, cw, activeMs, goneNow)) return;
 
-        // Forward-progress skip: if most of the waypoints AHEAD of this straggler are already done, we ran
-        // past it (a chain-clear or a run-ahead consumed its neighbours) — skip it instead of doubling back.
+        // forward-progress skip: most waypoints ahead are already clear
         int look = 0, aheadClear = 0;
         for (int k = sr.cursor + 1; k < size && look < FORWARD_SKIP_WINDOW; k++, look++) {
             if (areaMostlyClear(level, sr, k)) aheadClear++;
@@ -300,8 +295,7 @@ public final class RouteService {
             return;
         }
 
-        // Stuck guard: if this area won't clear (an unreachable leftover chest) and we've made no progress for a
-        // while, give up on this waypoint and move on — a single stubborn chest can't freeze the route.
+        // stuck guard: no progress in this area for STUCK_TICKS
         int rem = countRemainingInArea(level, sr, cw.pos);
         if (sr.stuckCursor != sr.cursor || rem < sr.lastAreaRemaining) {
             sr.stuckCursor = sr.cursor;
@@ -315,11 +309,9 @@ public final class RouteService {
         }
 
         if (isTargetChestAt(level, world(sr, cw.pos), sr.targetType)) {
-            sr.retargetPos = null; // trigger still there — aim at it
+            sr.retargetPos = null;
             return;
         }
-        // Trigger consumed. A cluster that is down to a mop-up, or already half gone, isn't worth the detour:
-        // drop the waypoint and continue. Otherwise aim at the nearest leftover so nothing is abandoned.
         double gone = goneFrac(sr, sr.cursor, rem);
         boolean spent = rem <= Math.max(0, RouterunnerConfig.get().stragglerSkip) || gone >= SPENT_GONE_FRAC;
         if (spent && activeMs - sr.lastSkipMs >= SKIP_COOLDOWN_MS) {
@@ -331,26 +323,24 @@ public final class RouteService {
         }
         sr.retargetPos = nearestRemainingNear(level, sr, cw.pos);
         if (sr.retargetPos != null && sr.retargetLoggedCursor != sr.cursor) {
-            sr.retargetLoggedCursor = sr.cursor; // the aim point is recomputed every tick; the log wants it once
+            sr.retargetLoggedCursor = sr.cursor;
             RunLog.retarget(sr.cellKey, sr.cursor, rem, gone);
         }
     }
 
     /**
-     * The MISSED-and-receding rule, the heart of the path continuer: you flew past this waypoint, it is behind
-     * you and getting further away, so it is discarded and the cursor moves to the plan's NEXT waypoint (never
-     * to a different one). Every condition below exists to keep it rare — it must not fire on an approach, on a
-     * strafe around a cluster you are still mining, or on a waypoint that was behind you from the start (tour
-     * geometry). The heading is MOMENTUM only: look yaw swings constantly and means nothing about travel.
+     * Skip the cursor's waypoint if the player has passed it: it was ahead of the momentum heading at some point
+     * this leg, is now well behind it and receding, the player is moving fast, nothing broke recently, and the
+     * cluster isn't a full untouched one. Heading is from velocity, not look direction.
      *
-     * @return true if the waypoint was discarded and the cursor has already moved on
+     * @return true if the waypoint was discarded and the cursor has moved on
      */
     private static boolean maybeSkipMissed(Level level, Player player, SolvedRoute sr, RoutePlan.WP cw,
                                            long activeMs, int goneNow) {
         BlockPos w = world(sr, cw.pos);
         double dx = w.getX() + 0.5 - player.getX(), dz = w.getZ() + 0.5 - player.getZ();
         double dist = Math.hypot(dx, dz);
-        if (sr.missCursor != sr.cursor) { // the cursor moved: nothing is known about this waypoint yet
+        if (sr.missCursor != sr.cursor) {
             sr.missCursor = sr.cursor;
             sr.lastWpDist = dist;
             sr.recedingSinceMs = -1;
@@ -365,19 +355,18 @@ public final class RouteService {
 
         Vec3 v = player.getDeltaMovement();
         double vlen = Math.hypot(v.x, v.z);
-        if (vlen < MOMENTUM_MIN || dist < RECEDE_EPS) return false; // no momentum heading = no judgement this tick
+        if (vlen < MOMENTUM_MIN || dist < RECEDE_EPS) return false;
         double cos = (v.x * dx + v.z * dz) / (vlen * dist);
-        if (cos > 0) sr.wpWasAhead = true; // it was in FRONT of you at some point in this leg
+        if (cos > 0) sr.wpWasAhead = true;
 
-        if (!sr.wpWasAhead) return false;                                  // started behind you — the tour meant that
-        if (vlen * 20.0 < MISSED_MIN_SPEED) return false;                  // manoeuvring, not flying past
-        if (cos >= MISSED_ANGLE_COS) return false;                         // not far enough behind the heading
+        if (!sr.wpWasAhead) return false;
+        if (vlen * 20.0 < MISSED_MIN_SPEED) return false;
+        if (cos >= MISSED_ANGLE_COS) return false;
         if (sr.recedingSinceMs < 0 || activeMs - sr.recedingSinceMs < MISSED_RECEDE_MS) return false;
-        if (activeMs - sr.lastBreakMs < MISSED_BREAK_QUIET_MS) return false; // still mining here
-        if (activeMs - sr.lastSkipMs < SKIP_COOLDOWN_MS) return false;       // shared rate limit
+        if (activeMs - sr.lastBreakMs < MISSED_BREAK_QUIET_MS) return false;
+        if (activeMs - sr.lastSkipMs < SKIP_COOLDOWN_MS) return false;
         int rem = countRemainingInArea(level, sr, cw.pos);
         double gone = goneFrac(sr, sr.cursor, rem);
-        // a FULL, untouched cluster is worth turning around for; a partly-eaten one is not
         if (gone < MISSED_GONE_FRAC && isTargetChestAt(level, w, sr.targetType)) return false;
 
         LOG.info("[Routerunner] missed waypoint {} ({} blocks back, {}% of its cluster gone) — continuing to the next",
@@ -388,10 +377,8 @@ public final class RouteService {
     }
 
     /**
-     * Discard the cursor's waypoint without crediting a reach and continue to the plan's next one. The leg
-     * bookkeeping rolls forward exactly as it does on a reach, so the following leg's distance and cleared
-     * count still measure from here; {@link AdaptiveWeights} is deliberately not fed — a skipped leg never
-     * ended in a stop, so it carries no stop overhead to measure.
+     * Discard the cursor's waypoint as a {@code skip} and move to the next one, rolling the leg bookkeeping
+     * forward as a reach would. Does not feed {@link AdaptiveWeights}.
      */
     private static void skipWaypoint(SolvedRoute sr, RoutePlan.WP wp, String reason, long activeMs, int goneNow) {
         logSkip(sr, world(sr, wp.pos), reason);
@@ -403,7 +390,7 @@ public final class RouteService {
         sr.stuckTicks = 0;
     }
 
-    /** Fraction of a waypoint's ORIGINAL cluster already gone; 1.0 when the solve recorded no baseline for it. */
+    /** Fraction of a waypoint's original cluster already gone; 1.0 when there is no baseline for it. */
     private static double goneFrac(SolvedRoute sr, int cursor, int remaining) {
         int total = (sr.areaTotal != null && cursor < sr.areaTotal.length) ? sr.areaTotal[cursor] : 0;
         if (total <= 0) return 1.0;
@@ -415,9 +402,8 @@ public final class RouteService {
     }
 
     /**
-     * Log the current cursor's waypoint and advance the cursor past it. It counts as REACHED unless the player
-     * never cleared it themselves — its trigger chest was already gone AND this leg cleared nothing — in which
-     * case it was a straggler/run-past and goes out as {@code skip} with {@code skipReason} instead.
+     * Log the cursor's waypoint and advance past it: a {@code reach} (and an adaptive leg sample if no teleport
+     * occurred), or a {@code skip} with {@code skipReason} if its trigger was already gone and this leg cleared nothing.
      */
     private static void logReach(Level level, SolvedRoute sr, RoutePlan.WP wp, long activeMs, int goneNow,
                                  String skipReason) {
@@ -430,8 +416,6 @@ public final class RouteService {
         } else {
             RunLog.reach(sr.cellKey, sr.roomId, sr.targetType, sr.cursor, wpos, wp.segMode,
                     plannedDist, actualCleared, wp.plannedCleared, dt, sr.tpSinceWp);
-            // Only a REACHED leg ended in a real stop; a skipped waypoint has no stop overhead to measure.
-            // A leg with a teleport in it is not a travel measurement either — its dt says nothing about walking.
             if (sr.tpSinceWp == 0) AdaptiveWeights.get().observeLeg(wp.segMode, plannedDist, dt);
         }
         sr.goneAtLastWp = goneNow;
@@ -441,21 +425,16 @@ public final class RouteService {
         sr.cursor++;
     }
 
-    /**
-     * The STRAGGLER half of the DONE test: the waypoint's trigger chest is already gone and only a
-     * {@code stragglerSkip}-sized mop-up is left in its area. This is what stops the cursor sending the player
-     * back across a dense room for one to three leftovers a neighbour's chain missed. (The other half is
-     * {@link #areaMostlyClear} — cleared, or {@link #AREA_DONE_FRAC} of the original cluster gone.)
-     */
+    /** True if the waypoint's trigger is gone and at most {@code stragglerSkip} chests remain in its area. */
     private static boolean stragglerDone(Level level, SolvedRoute sr, int cursor) {
         int skip = Math.max(0, RouterunnerConfig.get().stragglerSkip);
         if (skip <= 0) return false;
         P wp = sr.plan.waypoints.get(cursor).pos;
-        if (isTargetChestAt(level, world(sr, wp), sr.targetType)) return false; // trigger still standing — go break it
+        if (isTargetChestAt(level, world(sr, wp), sr.targetType)) return false;
         return countRemainingInArea(level, sr, wp) <= skip;
     }
 
-    /** True if no target chest remains within {@link #AREA_R} of a waypoint (its cluster is cleared → advance past it). */
+    /** True if no target chest remains within {@link #AREA_R} of a waypoint. */
     private static boolean areaClear(Level level, SolvedRoute sr, P wpLocal) {
         BlockPos c = world(sr, wpLocal);
         for (BlockPos p : sr.targetsWorld) {
@@ -464,7 +443,7 @@ public final class RouteService {
         return true;
     }
 
-    /** Count of still-present target chests within {@link #AREA_R} of a waypoint (progress signal for the stuck guard). */
+    /** Count of still-present target chests within {@link #AREA_R} of a waypoint. */
     private static int countRemainingInArea(Level level, SolvedRoute sr, P wpLocal) {
         BlockPos c = world(sr, wpLocal);
         int n = 0;
@@ -474,7 +453,7 @@ public final class RouteService {
         return n;
     }
 
-    /** Baseline count of target chests within AREA_R of each waypoint at solve time (all chests present). */
+    /** Per-waypoint count of target chests within {@link #AREA_R} at solve time. */
     private static int[] areaTotals(SolvedRoute sr) {
         int n = sr.plan.waypoints.size();
         int[] tot = new int[n];
@@ -487,16 +466,16 @@ public final class RouteService {
         return tot;
     }
 
-    /** A waypoint is "done" if its cluster is fully clear OR >= AREA_DONE_FRAC of its ORIGINAL chests are gone. */
+    /** True if the waypoint's area is clear or at least {@link #AREA_DONE_FRAC} of its original chests are gone. */
     private static boolean areaMostlyClear(Level level, SolvedRoute sr, int cursor) {
         P wp = sr.plan.waypoints.get(cursor).pos;
         if (areaClear(level, sr, wp)) return true;
         int total = (sr.areaTotal != null && cursor < sr.areaTotal.length) ? sr.areaTotal[cursor] : 0;
-        if (total <= 0) return false; // no baseline → fall back to requiring fully clear (handled above)
+        if (total <= 0) return false;
         return countRemainingInArea(level, sr, wp) <= Math.ceil((1.0 - AREA_DONE_FRAC) * total);
     }
 
-    /** Nearest still-present target chest within AREA_R of the waypoint (returned in local coords), or null. */
+    /** Nearest still-present target chest within {@link #AREA_R} of the waypoint (local coords), or null. */
     private static P nearestRemainingNear(Level level, SolvedRoute sr, P wpLocal) {
         BlockPos c = world(sr, wpLocal);
         BlockPos best = null;
@@ -524,7 +503,7 @@ public final class RouteService {
     }
 
     private static boolean isTargetChestAt(Level level, BlockPos pos, String targetType) {
-        if (!level.isLoaded(pos)) return true; // unloaded -> treat as present (don't falsely count cleared)
+        if (!level.isLoaded(pos)) return true; // unloaded counts as present
         ResourceLocation id = ForgeRegistries.BLOCKS.getKey(level.getBlockState(pos).getBlock());
         if (id == null) return false;
         String s = id.toString();
@@ -541,7 +520,7 @@ public final class RouteService {
             case ORNATE: return "ornate";
             case LIVING: return "living";
             case WOODEN: return "wooden";
-            default: break; // AUTO / ALL
+            default: break;
         }
         String resolved = LootListener.get().getResolvedType();
         if (resolved != null) return resolved;
@@ -550,10 +529,11 @@ public final class RouteService {
         return RoomGeometry.TYPES[best];
     }
 
+    /** Solver weights from config, session bail, Chain Miner tier and player speed, with adaptive scaling applied. */
     private static RoutePlanner.Params buildParams(RouterunnerConfig cfg) {
         RoutePlanner.Params p = new RoutePlanner.Params();
         p.bail = dynamicBail(cfg);
-        p.bailAggression = cfg.bailAggression; // fallback (warmup) self-references the room's own hot-spot rate
+        p.bailAggression = cfg.bailAggression;
         p.tightMult = cfg.tightMult;
         p.narrowMult = cfg.narrowMult;
         p.midMult = cfg.midMult;
@@ -595,20 +575,18 @@ public final class RouteService {
         p.chainRange = chain[0];
         p.chainLimit = chain[1];
         p.speedAttr = PlayerSpeed.attribute(Minecraft.getInstance().player);
-        AdaptiveWeights.get().apply(p, cfg); // measured per-profile scaling on top of the sliders
+        AdaptiveWeights.get().apply(p, cfg);
         return p;
     }
 
-    /** The weight snapshot a solve would run with right now — what {@code vault_enter} stamps into the run log. */
+    /** The weight snapshot a solve would run with right now. */
     public static RoutePlanner.Params snapshotParams() {
         return buildParams(RouterunnerConfig.get());
     }
 
     /**
-     * A tracked chest broke: stamp the active clock (the "you are still mining here" guard the missed-waypoint
-     * rule waits on) and, if it was one of the current room's targets, record it in that room's
-     * {@link SolvedRoute#userBreaks} (active-clock + ROOM-LOCAL position). Kept in memory for the adaptive
-     * pass and counted into the room's diff record; nothing is written here.
+     * A tracked chest broke: stamp {@link SolvedRoute#lastBreakMs} and, if it is one of the current room's
+     * targets, append it to {@link SolvedRoute#userBreaks}.
      */
     public static void onChestBroken(BlockPos pos) {
         SolvedRoute sr = current;
@@ -625,36 +603,34 @@ public final class RouteService {
         }
     }
 
-    // ---- dynamic bail (MVT, throughput-first — see NORTH_STAR.md): leave a room when its marginal drops below
-    // bailAggression × the OPPORTUNITY rate = the typical hot-spot marginal across rooms (top-quartile of each
-    // room's break values). Policy-INDEPENDENT (read off the full greedy curve, not the achieved average), so it
-    // doesn't self-reinforce. Loots dense clusters, drops low-value tails, leaves poor rooms fast. Warmup = the
-    // room self-references its own hot-spot rate. (sessionChests/Blocks kept only for the info log now.)
-    private static double sessionChests = 0;
-    private static double sessionBlocks = 0;
-    private static int roomsMeasured = 0;
-    private static double sessionHotSpotSum = 0; // running sum of per-room hot-spot rates (the opportunity signal for bail)
-    private static int roomsForHotSpot = 0;      // rooms folded into the hot-spot average
-    private static double pendingHallwayBlocks = 0; // player travel accumulated between rooms
+    /** Sum of per-room hot-spot rates this vault. */
+    private static double sessionHotSpotSum = 0;
+    private static int roomsForHotSpot = 0;
+    /** Horizontal player travel outside rooms since the last room change (blocks). */
+    private static double pendingHallwayBlocks = 0;
     private static Vec3 lastPlayerPos = null;
     private static SolvedRoute measuredRoom = null;
     private static long measuredCellKey = NO_CELL;
 
+    /**
+     * Absolute bail for the next solve: the config override if set, else bailAggression × the vault's average
+     * hot-spot rate; 0 before any room is measured (the planner then uses the room's own hot-spot rate).
+     */
     private static double dynamicBail(RouterunnerConfig cfg) {
-        if (cfg.bail > 0.0) return cfg.bail; // manual absolute override
+        if (cfg.bail > 0.0) return cfg.bail;
         if (roomsForHotSpot > 0) {
-            double avgHot = sessionHotSpotSum / roomsForHotSpot; // opportunity cost of staying = typical hot-spot rate
+            double avgHot = sessionHotSpotSum / roomsForHotSpot;
             return cfg.bailAggression * avgHot;
         }
-        return 0.0; // warmup: planRoute falls back to bailAggression × this room's own hot-spot rate
+        return 0.0;
     }
 
-    /** Accumulate hallway travel and roll room totals into the session rate as rooms change. */
+    /** Accumulate hallway travel; on a room change, finalize the previous room for bail, adaptive weights and diff. */
     private static void updateBailMetrics(Player player, boolean playerInRoom) {
         Vec3 cur = player.position();
         if (lastPlayerPos != null) {
             double step = Math.hypot(cur.x - lastPlayerPos.x, cur.z - lastPlayerPos.z);
-            if (step < 20.0 && !playerInRoom) pendingHallwayBlocks += step; // count only between-room travel
+            if (step < 20.0 && !playerInRoom) pendingHallwayBlocks += step;
         }
         lastPlayerPos = cur;
 
@@ -662,25 +638,25 @@ public final class RouteService {
         if (crt != null && crt.cellKey != measuredCellKey) {
             if (measuredRoom != null) {
                 finalizeRoomForBail(measuredRoom);
-                AdaptiveWeights.get().observeRoom(measuredRoom); // measure the trail BEFORE the room is scored
-                finalizeRoomForDiff(measuredRoom); // log the just-left room's you-vs-solver comparison
+                AdaptiveWeights.get().observeRoom(measuredRoom);
+                finalizeRoomForDiff(measuredRoom);
             }
-            crt.hallwayIn = pendingHallwayBlocks; // the travel that got us to this room
+            crt.hallwayIn = pendingHallwayBlocks;
             pendingHallwayBlocks = 0;
             measuredRoom = crt;
             measuredCellKey = crt.cellKey;
         }
     }
 
+    /** Fold the room's hot-spot rate into the session average and log a room sample. */
     private static void finalizeRoomForBail(SolvedRoute room) {
-        double hs = room.plan.hotSpotRate; // this room's opportunity rate → the bail level for subsequent rooms
+        double hs = room.plan.hotSpotRate;
         if (hs > 0) {
             sessionHotSpotSum += hs;
             roomsForHotSpot++;
         }
-        double chests = room.goneAtLastWp; // info only (chests actually cleared while we were here)
+        double chests = room.goneAtLastWp;
         double blocks = room.plan.walkBlocks + room.plan.flyBlocks + room.hallwayIn;
-        if (chests > 0 && blocks > 0.5) { sessionChests += chests; sessionBlocks += blocks; roomsMeasured++; }
         LOG.info("[Routerunner] room sample: {} chests / {} blocks; hot-spot {} (avg {} over {} rooms)",
                 (int) chests, String.format(Locale.ROOT, "%.0f", blocks),
                 String.format(Locale.ROOT, "%.3f", hs),
@@ -688,16 +664,13 @@ public final class RouteService {
                 roomsForHotSpot);
     }
 
-    // ---- diff-route: record YOUR path through the room, then score it vs the solver's route on room exit ----
-
     /**
-     * Sample the player's position (local float) + chests-cleared into the current room's diff capture (~10 Hz).
-     * Each sample is {@code {lx, ly, lz, activeMs, yaw, pitch}} — the scorer reads only 0..2, the rest is there so
-     * a room's trail can be replayed against the {@code pos} stream and its ts/t bounds.
+     * Sample the player into the room's trail at up to 10 Hz, skipping moves under 0.25 blocks, and track
+     * chests cleared. Each sample is {@code {lx, ly, lz, activeMs, yaw, pitch, teleportFlag}}.
      */
     private static void captureTrail(Level level, SolvedRoute sr, Player player) {
         long ms = MetricsTracker.get().getActiveMs();
-        if (ms - sr.lastCaptureMs < 100) return; // ~10 Hz is plenty to score a path
+        if (ms - sr.lastCaptureMs < 100) return;
         sr.lastCaptureMs = ms;
         long wall = System.currentTimeMillis();
         if (sr.userFirstMs == 0) sr.userFirstMs = ms;
@@ -712,10 +685,10 @@ public final class RouteService {
             sr.lastTrailX = lx; sr.lastTrailZ = lz; sr.haveTrail = true;
         }
         int gone = countGone(level, sr);
-        if (gone > sr.userChests) sr.userChests = gone; // chests only clear, so max = cleared while you were here
+        if (gone > sr.userChests) sr.userChests = gone;
     }
 
-    /** Score your path vs the solver's WALK route (same cost model) and log one diff record for the room. */
+    /** Score the player's trail against the solver's ground route and log one diff record for the room. */
     private static void finalizeRoomForDiff(SolvedRoute room) {
         if (!RouterunnerConfig.get().diffRoute) return;
         try {
@@ -728,10 +701,8 @@ public final class RouteService {
             double[] user = RoutePlanner.scoreTrajectory(room.userTrail, room.grid, pm);
             double[] solver = scoreSolverWalk(room.plan, room.grid, pm);
             double sec = Math.max(0.001, (room.userLastMs - room.userFirstMs) / 1000.0);
-            // How far your actual path strayed from the drawn line. With routing ON this is followability (execution
-            // wobble/overshoot); with routing OFF it's how spatially different your free route was from the solver's.
             double[] follow = followDeviation(room.userTrail, room.plan.path);
-            boolean routing = RouterunnerConfig.get().routingEnabled; // were you FOLLOWING the route, or freehanding?
+            boolean routing = RouterunnerConfig.get().routingEnabled;
             double[] accuracy = routeAccuracy(room, follow);
             RunLog.roomDiff(room, MetricsTracker.get().getLap(), routing, sec, user, solver, follow, accuracy);
             if (accuracy == null) {
@@ -757,10 +728,7 @@ public final class RouteService {
         }
     }
 
-    /**
-     * Sum {@link RoutePlanner#scoreTrajectory} over the solver route's GROUND legs — walk and drop — and skip
-     * trident/sprint/gap. A drop is part of the floor path a human would actually run, so it scores as walk.
-     */
+    /** Sum {@link RoutePlanner#scoreTrajectory} over the plan's walk and drop runs, skipping trident/sprint/gap. */
     private static double[] scoreSolverWalk(RoutePlan plan, SolidGrid grid, RoutePlanner.Params pm) {
         double[] sum = new double[5];
         if (plan.path == null || plan.pathMode == null) return sum;
@@ -786,13 +754,10 @@ public final class RouteService {
     }
 
     /**
-     * How well the room's ORIGINAL plan order predicted the order you actually broke chests in, measured
-     * against the order plain proximity would have produced. Each planned waypoint is matched to one of your
-     * breaks (exact block first, else the nearest unused break within {@link #ACC_MATCH_R} blocks); ρ is the
-     * Spearman correlation between planned index and break time, ρ_NN the same for a greedy nearest-neighbour
-     * tour from your entry point. The LIFT (ρ − ρ_NN) is what the solver actually contributed — a route that
-     * merely reproduces "go to the closest chest" scores zero however well you followed it — and is combined
-     * with how closely you hugged the drawn line.
+     * How well the plan order predicted the player's break order, beyond plain proximity. Planned waypoints are
+     * matched to breaks (exact block, else nearest within {@link #ACC_MATCH_R}); rho is the Spearman correlation
+     * of planned index vs break time and rhoNN the same for a nearest-neighbour tour from the entry point.
+     * score = 0.7 × normalized lift (rho − rhoNN) + 0.3 × spatial follow term.
      *
      * @return {n, rho, rhoNN, lift, spatial, score}, or null when fewer than {@link #ACC_MIN_MATCHES} matched
      */
@@ -823,7 +788,7 @@ public final class RouteService {
         return new double[]{n, rho, rhoNN, lift, spatial, score};
     }
 
-    /** The unused break at a planned waypoint: the exact block if you broke it, else the nearest within 2 blocks. */
+    /** Index of the unused break at a planned waypoint (exact block, else nearest within {@link #ACC_MATCH_R}), or -1. */
     private static int matchBreak(SolvedRoute room, P wp, boolean[] used) {
         for (int b = 0; b < room.userBreaks.size(); b++) {
             if (used[b]) continue;
@@ -842,10 +807,7 @@ public final class RouteService {
         return best;
     }
 
-    /**
-     * Greedy nearest-neighbour tour over the matched waypoints, starting from where you entered the room —
-     * the naive baseline the plan has to beat. Returns each match's position in that tour.
-     */
+    /** Each match's position in a greedy nearest-neighbour tour starting from the trail's first point. */
     private static double[] nearestNeighbourOrder(java.util.List<double[]> matched, java.util.List<double[]> trail) {
         int n = matched.size();
         double[] order = new double[n];
@@ -868,7 +830,7 @@ public final class RouteService {
                 double d = dx * dx + dy * dy + dz * dz;
                 if (d < bd) { bd = d; best = i; }
             }
-            if (best < 0) break; // unreachable: taken[] can't be full before step n
+            if (best < 0) break;
             taken[best] = true;
             order[best] = step;
             double[] m = matched.get(best);
@@ -923,7 +885,7 @@ public final class RouteService {
         return v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v);
     }
 
-    /** How far your path strayed from the drawn route: {avgBlocks, maxBlocks, pct of trail >2 blocks off} (horizontal). */
+    /** Horizontal trail deviation from the route path: {avgBlocks, maxBlocks, percent of samples >2 blocks off}. */
     private static double[] followDeviation(java.util.List<double[]> trail, java.util.List<P> path) {
         if (path == null || path.isEmpty() || trail.isEmpty()) return new double[]{0, 0, 0};
         double sum = 0, max = 0;
@@ -985,57 +947,73 @@ public final class RouteService {
 
     private RouteService() {}
 
-    /** A solved, locked route for one cell (positions in LOCAL coords + the world origin to transform). */
+    /** A solved route for one cell plus its live follow state; positions are local to the world origin (ox, oy, oz). */
     public static final class SolvedRoute {
         public final long cellKey;
         public final int ox, oy, oz;
         public volatile String roomId;
         public final String targetType;
         public final RoutePlan plan;
-        /** The plan's waypoint order frozen at solve time. The follow-cursor only ever discards the waypoint in
-         *  front of it, so this matches the live list; it is kept so the accuracy scorer can never be read
-         *  against a mutated plan. */
+        /** Immutable copy of the plan's waypoint order at solve time, for the accuracy scorer. */
         public final java.util.List<RoutePlan.WP> plannedOrder;
         public final java.util.List<BlockPos> targetsWorld;
-        /** Non-target chests and strongboxes in the cell at solve time, LOCAL, with their block ids (log only). */
+        /** Non-target chests and strongboxes in the cell at solve time (local), with their block ids. */
         public final java.util.List<P> otherChestsLocal;
         public final java.util.List<String> otherChestIds;
         public final P exitLocal;
-        public final SolidGrid grid; // retained for the diff-route path scorer (the real room can't be rebuilt offline)
-        public final RoutePlanner.Params params; // the exact weight snapshot this route was solved with
-        public volatile long solveMs = -1, geomMs = -1, queueMs = -1; // planRoute wall time, snapshot build time, solver-queue wait
-        int tpSinceWp = 0;              // teleports since the last reached waypoint (a leg containing one is not a travel measurement)
-        boolean tpSinceCapture = false; // a teleport happened since the last trail sample; the next sample carries the flag
-        // diff-route capture (populated only while diff mode is on) — YOUR path through this room + real time/chests
-        final java.util.List<double[]> userTrail = new java.util.ArrayList<>(); // local {x,y,z,activeMs,yaw,pitch}
-        /** Chests of THIS room you actually broke: {activeMs, lx, ly, lz}. Kept for the adaptive pass. */
+        /** Solidity grid the route was solved on; used by the diff scorer and adaptive weights. */
+        public final SolidGrid grid;
+        /** The weight snapshot this route was solved with. */
+        public final RoutePlanner.Params params;
+        /** Solve wall time, snapshot build time and solver-queue wait (ms); -1 until solved. */
+        public volatile long solveMs = -1, geomMs = -1, queueMs = -1;
+        /** Teleports since the last reached waypoint. */
+        int tpSinceWp = 0;
+        /** A teleport happened since the last trail sample. */
+        boolean tpSinceCapture = false;
+        /** Player trail, local {x, y, z, activeMs, yaw, pitch, teleportFlag}; captured while diff or adaptive is on. */
+        final java.util.List<double[]> userTrail = new java.util.ArrayList<>();
+        /** Target chests of this room the player broke: {activeMs, lx, ly, lz}. */
         final java.util.List<double[]> userBreaks = new java.util.ArrayList<>();
-        java.util.Set<BlockPos> targetSet = null; // lazily-built membership index over targetsWorld
-        int userChests = 0;            // max chests gone from this room while you were in it
-        long userFirstMs = 0, userLastMs = 0, lastCaptureMs = 0; // active-time bounds + capture throttle
-        long firstTs = 0, lastTs = 0;  // wall-clock bounds of your time in the room (slices the pos/break streams)
-        double lastTrailX, lastTrailZ; // last recorded point (for move-distance dedupe)
+        /** Lazily built set over {@link #targetsWorld}. */
+        java.util.Set<BlockPos> targetSet = null;
+        /** Max chests gone from this room while the player was in it. */
+        int userChests = 0;
+        /** Active-clock bounds of the trail and the capture throttle (ms). */
+        long userFirstMs = 0, userLastMs = 0, lastCaptureMs = 0;
+        /** Wall-clock bounds of the trail (ms). */
+        long firstTs = 0, lastTs = 0;
+        double lastTrailX, lastTrailZ;
         boolean haveTrail = false;
         public volatile int cursor = 0;
-        public volatile P retargetPos = null; // if the cursor's trigger was consumed, aim here (nearest remaining) instead
-        int[] areaTotal;               // per-waypoint: target chests originally within AREA_R (baseline for the %-done skip)
-        int stuckCursor = -1;          // cursor value the stuck-guard is tracking
-        int stuckTicks = 0;            // ticks with no local progress on the current area
-        int lastAreaRemaining = 0;     // remaining chests in the current area at last progress
-        int missCursor = -1;           // waypoint index the missed-rule tracking below belongs to
-        double lastWpDist = 0;         // last horizontal distance to it (the receding test)
-        long recedingSinceMs = -1;     // active clock when that distance started growing; -1 = not receding
-        boolean wpWasAhead = false;    // it was in FRONT of the player's momentum at some point in this leg
-        long lastBreakMs = -60_000;    // active clock of the last tracked chest break (starts "long ago")
-        long lastSkipMs = -60_000;     // active clock of the last missed/spent skip (their shared rate limit)
-        int retargetLoggedCursor = -1; // waypoint whose retarget has already gone into the run log
-        public int connCursor = -1;    // cursor the connector dijkstra was computed for (render-thread only)
-        public int[][] connDijk = null; // cached {dist,prev} from the current target node, for the from-player connector
+        /** When the cursor's trigger is gone, the nearest remaining chest in its area to aim at instead; else null. */
+        public volatile P retargetPos = null;
+        /** Per-waypoint target chests within AREA_R at solve time. */
+        int[] areaTotal;
+        int stuckCursor = -1;
+        int stuckTicks = 0;
+        int lastAreaRemaining = 0;
+        /** Waypoint index the missed-rule state below belongs to. */
+        int missCursor = -1;
+        double lastWpDist = 0;
+        /** Active clock when the distance to the waypoint started growing; -1 if not receding. */
+        long recedingSinceMs = -1;
+        boolean wpWasAhead = false;
+        /** Active clock of the last tracked chest break. */
+        long lastBreakMs = -60_000;
+        /** Active clock of the last missed/spent skip. */
+        long lastSkipMs = -60_000;
+        int retargetLoggedCursor = -1;
+        /** Cache key of {@link #connDijk} (render thread only). */
+        public int connCursor = -1;
+        /** Cached Dijkstra {dist, prev} from the connector target node (render thread only). */
+        public int[][] connDijk = null;
         long startActiveMs;
         long lastWpActiveMs;
         double prevCumDist = 0;
         int goneAtLastWp = 0;
-        double hallwayIn = 0; // hallway blocks travelled to reach this room (for dynamic bail)
+        /** Hallway blocks travelled to reach this room. */
+        double hallwayIn = 0;
 
         SolvedRoute(long cellKey, int ox, int oy, int oz, String roomId, String targetType,
                     RoutePlan plan, java.util.List<BlockPos> targetsWorld, java.util.List<P> otherChestsLocal,

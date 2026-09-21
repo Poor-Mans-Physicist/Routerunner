@@ -12,23 +12,16 @@ import java.lang.reflect.Method;
 import java.util.Optional;
 
 /**
- * Guarded the_vault accessor for the player's ACTUAL Chain Miner tier, which is what the solver's
- * {@link com.routerunner.solver.ChainModel} must simulate: a tier-6 chain clears a very different
- * blob than a tier-1 one, so planning against fixed 6/32 mis-values every cluster off-tier.
- *
- * <p>Read chain (client-synced ability tree, all inside try/catch):
- * {@code ClientAbilityData.getTree()} → {@code getForId("Vein_Miner")} → {@link SpecializedSkill} →
- * {@code getSpecialization()} (must be id {@code Vein_Miner_Chain}, else a different Vein Miner spec
- * is selected) → {@link TieredSkill} → {@code getChild()} (the node at the ACTUAL tier, gear bonus
- * included). {@code getUnmodifiedBlockLimit()} and {@code getRange()} are then called REFLECTIVELY:
- * the range getter lives in the Wold's Vaults addon ({@code VeinMinerChainAbility implements
- * DuckGetRange}), which is not on our compile classpath.
+ * Guarded the_vault accessor for the player's actual Chain Miner tier, which {@link com.routerunner.solver.ChainModel}
+ * simulates. Reads the client-synced ability tree: {@code Vein_Miner} → specialization {@code Vein_Miner_Chain} →
+ * tier child node, whose {@code getUnmodifiedBlockLimit()}/{@code getRange()} are called reflectively because the
+ * range getter lives in the Wold's Vaults addon, which is not on the compile classpath.
  */
 public final class ChainMinerInfo {
     private static final Logger LOGGER = LogUtils.getLogger();
     private static final String ABILITY_ID = "Vein_Miner";
     private static final String CHAIN_SPEC_ID = "Vein_Miner_Chain";
-    /** Used when the tree can't be read — matches the pre-tier-awareness hardcoded model. */
+    /** {range, limit} used when the tree can't be read. */
     private static final int[] FALLBACK = {6, 32};
 
     private static volatile String lastReason = null;
@@ -80,7 +73,7 @@ public final class ChainMinerInfo {
         }
     }
 
-    /** Log this reason once (it would otherwise fire on every solve) and hand back the hardcoded model. */
+    /** Log this reason once and return a copy of {@link #FALLBACK}. */
     private static int[] fallback(String reason) {
         if (!reason.equals(lastReason)) {
             lastReason = reason;

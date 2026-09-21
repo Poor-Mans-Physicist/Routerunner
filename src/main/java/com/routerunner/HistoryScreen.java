@@ -30,7 +30,7 @@ public class HistoryScreen extends Screen {
     @Override
     protected void init() {
         this.entries = HistoryStore.load();
-        Collections.reverse(this.entries); // newest first
+        Collections.reverse(this.entries);
         this.addRenderableWidget(new Button(this.width / 2 - 100, this.height - 28, 200, 20,
                 new TextComponent("Done"), b -> this.onClose()));
     }
@@ -70,11 +70,7 @@ public class HistoryScreen extends Screen {
         super.render(ps, mouseX, mouseY, partialTicks);
     }
 
-    /**
-     * Show only the modifiers relevant to what this vault was farmed for — the bonus/cascade
-     * modifiers naming the tracked chest type (e.g. "Bonus Gilded", "Gilded Cascade" for a gilded
-     * run). The full set buries those. Falls back to all modifiers if the type wasn't resolved.
-     */
+    /** The vault's modifiers that name its tracked chest type, or all of them if the type is unresolved. */
     private static String modifierLine(VaultSummary s) {
         if (s.modifiers == null || s.modifiers.isEmpty()) return "(no modifiers recorded)";
         String type = s.type == null ? "" : s.type.toLowerCase(Locale.ROOT);

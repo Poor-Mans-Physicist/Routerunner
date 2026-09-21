@@ -22,8 +22,10 @@ import net.minecraftforge.client.gui.IIngameOverlay;
 /** In-game HUD overlay: the four chest-rate readouts, the movable loot panel and the off-screen target arrow. */
 public class RouterunnerHud implements IIngameOverlay {
     public static final RouterunnerHud INSTANCE = new RouterunnerHud();
-    private static final float ARROW_PX = 12.0f;    // length of the off-screen target arrow
-    private static final double EDGE_MARGIN = 10.0; // how far the arrow stays off the screen edge
+    /** Length (px) of the off-screen target arrow. */
+    private static final float ARROW_PX = 12.0f;
+    /** Distance (px) the arrow keeps from the screen edge. */
+    private static final double EDGE_MARGIN = 10.0;
 
     @Override
     public void render(ForgeIngameGui gui, PoseStack poseStack, float partialTicks, int width, int height) {
@@ -31,8 +33,8 @@ public class RouterunnerHud implements IIngameOverlay {
         RouterunnerConfig cfg = RouterunnerConfig.get();
         if (!cfg.enabled) return;
         if (mc.options.hideGui || mc.player == null) return;
-        if (mc.screen != null) return; // the editor renders its own preview
-        if (!ClientEvents.isInVault(mc.level)) return; // only show inside a vault
+        if (mc.screen != null) return;
+        if (!ClientEvents.isInVault(mc.level)) return;
 
         Font font = mc.font;
         MetricsTracker m = MetricsTracker.get();
@@ -52,10 +54,7 @@ public class RouterunnerHud implements IIngameOverlay {
         }
     }
 
-    /**
-     * The bottom-left routing readout: the follow state, how well the last routed room's plan predicted the
-     * order you actually mined it in, and any adaptive multipliers that are confident enough to be applied.
-     */
+    /** The bottom-left routing readout: follow state, last room's route accuracy and applied adaptive multipliers. */
     private static String routeStatusLine() {
         StringBuilder sb = new StringBuilder(96).append("RR: ").append(RouteService.debugState());
         int acc = RouteService.lastAccuracyPct();
@@ -64,16 +63,15 @@ public class RouterunnerHud implements IIngameOverlay {
     }
 
     /**
-     * Screen-edge arrow for the current route target whenever it is outside the view: a filled pink triangle
-     * (the in-world marker's colour) clamped to the screen rectangle along the target's direction, with its
-     * distance in blocks beside it. Derived from the CAMERA, so it stays correct in third person.
+     * Screen-edge arrow and distance for the current route target while it is outside the view, computed from
+     * the camera so it holds in third person.
      */
     private static void renderOffscreenIndicator(PoseStack ps, Minecraft mc, Font font, int width, int height) {
         RouteService.SolvedRoute sr = RouteService.current();
         if (sr == null) return;
         P target = sr.retargetPos;
         if (target == null) {
-            if (sr.cursor >= sr.plan.waypoints.size()) return; // route done — the in-world EXIT marker takes over
+            if (sr.cursor >= sr.plan.waypoints.size()) return;
             target = sr.plan.waypoints.get(sr.cursor).pos;
         }
         BlockPos w = sr.worldOf(target);
@@ -84,15 +82,15 @@ public class RouterunnerHud implements IIngameOverlay {
         double dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
         if (dist < 0.001) return;
 
-        // Relative bearing of the target: yaw right-positive, pitch UP-positive (the camera's xRot is down-positive).
+        // Yaw right-positive, pitch up-positive (camera xRot is down-positive).
         double relYaw = Mth.wrapDegrees(Math.toDegrees(Math.atan2(-dx, dz)) - camera.getYRot());
         double relPitch = Math.toDegrees(Math.atan2(dy, horiz)) + camera.getXRot();
         double vFov = mc.options.fov;
         double aspect = height > 0 ? (double) width / (double) height : 1.0;
         double hFov = Math.toDegrees(2.0 * Math.atan(Math.tan(Math.toRadians(vFov) / 2.0) * aspect));
-        if (Math.abs(relYaw) < hFov / 2.0 && Math.abs(relPitch) < vFov / 2.0) return; // on screen: the marker shows it
+        if (Math.abs(relYaw) < hFov / 2.0 && Math.abs(relPitch) < vFov / 2.0) return;
 
-        double ux = relYaw, uy = -relPitch; // screen y grows downwards
+        double ux = relYaw, uy = -relPitch;
         double len = Math.hypot(ux, uy);
         if (len < 1.0e-6) return;
         ux /= len;
@@ -147,7 +145,7 @@ public class RouterunnerHud implements IIngameOverlay {
         return v < lo ? lo : (v > hi ? hi : v);
     }
 
-    /** Counters are per-LAP (New Lap restarts them); the whole-vault totals live in the run log and history. */
+    /** HUD text for one metric element; counts are per lap. */
     public static String textFor(RouterunnerConfig.HudElementId id, MetricsTracker m) {
         switch (id) {
             case TOTAL:      return "Chests: " + m.getLapTotal();

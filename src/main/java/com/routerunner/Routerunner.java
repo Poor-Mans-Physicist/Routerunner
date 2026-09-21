@@ -3,11 +3,8 @@ package com.routerunner;
 import net.minecraftforge.fml.common.Mod;
 
 /**
- * Routerunner — clientside Wold's Vaults chest-looting tools.
- *
- * Phase 0 scope: live chests/min metrics on a configurable, draggable HUD.
- * Client wiring (keybind, HUD overlay, tick/scan) lives in {@link ClientSetup} and
- * {@link ClientEvents}; this class only owns the mod id and eager config load.
+ * Routerunner: clientside Wold's Vaults chest-looting metrics and routing. Owns the mod id and loads the config;
+ * client wiring lives in {@link ClientSetup} and {@link ClientEvents}.
  */
 @Mod(Routerunner.MOD_ID)
 public class Routerunner {
