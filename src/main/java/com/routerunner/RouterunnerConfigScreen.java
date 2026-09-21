@@ -1,0 +1,205 @@
+package com.routerunner;
+
+import com.mojang.blaze3d.vertex.PoseStack;
+import com.mojang.logging.LogUtils;
+import net.minecraft.Util;
+import net.minecraft.client.gui.components.Button;
+import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.TextComponent;
+
+import java.nio.file.Files;
+
+/** Top-level config menu (opened by the keybind): toggles, loot-tracking mode, HUD editor, routing, logs. */
+public class RouterunnerConfigScreen extends Screen {
+    private static final int STEP = 24;
+    private static final int LEFT_ROWS = 8;
+    private static final int RIGHT_ROWS = 7;
+
+    private final Screen parent;
+    private int top;
+
+    public RouterunnerConfigScreen(Screen parent) {
+        super(new TextComponent("Routerunner"));
+        this.parent = parent;
+    }
+
+    @Override
+    protected void init() {
+        int cx = this.width / 2;
+        int step = STEP;
+        int rows = Math.max(LEFT_ROWS, RIGHT_ROWS);
+        top = topFor(rows, step);
+        int lx = cx - 154, rx = cx + 4, bw = 150;
+
+        // left column — toggles
+        int y = top;
+        this.addRenderableWidget(new Button(lx, y, bw, 20, enabledLabel(), b -> {
+            RouterunnerConfig cfg = RouterunnerConfig.get();
+            cfg.enabled = !cfg.enabled;
+            b.setMessage(enabledLabel());
+        }));
+        y += step;
+        this.addRenderableWidget(new Button(lx, y, bw, 20, routingLabel(), b -> {
+            RouterunnerConfig cfg = RouterunnerConfig.get();
+            cfg.routingEnabled = !cfg.routingEnabled;
+            b.setMessage(routingLabel());
+        }));
+        y += step;
+        this.addRenderableWidget(new Button(lx, y, bw, 20, trackedLabel(), b -> {
+            RouterunnerConfig cfg = RouterunnerConfig.get();
+            cfg.trackedChest = nextTracked(cfg.trackedChest);
+            LootListener.get().onModeChanged();
+            b.setMessage(trackedLabel());
+        }));
+        y += step;
+        this.addRenderableWidget(new Button(lx, y, bw, 20, diffLabel(), b -> {
+            RouterunnerConfig cfg = RouterunnerConfig.get();
+            cfg.diffRoute = !cfg.diffRoute;
+            b.setMessage(diffLabel());
+        }));
+        y += step;
+        this.addRenderableWidget(new Button(lx, y, bw, 20, hunterLabel(), b -> {
+            RouterunnerConfig cfg = RouterunnerConfig.get();
+            cfg.suppressHunter = !cfg.suppressHunter;
+            b.setMessage(hunterLabel());
+        }));
+        y += step;
+        this.addRenderableWidget(new Button(lx, y, bw, 20, adaptiveLabel(), b -> {
+            RouterunnerConfig cfg = RouterunnerConfig.get();
+            cfg.adaptiveWeights = !cfg.adaptiveWeights;
+            b.setMessage(adaptiveLabel());
+        }));
+        y += step;
+        this.addRenderableWidget(new Button(lx, y, bw, 20, missedSkipLabel(), b -> {
+            RouterunnerConfig cfg = RouterunnerConfig.get();
+            cfg.missedSkip = !cfg.missedSkip;
+            b.setMessage(missedSkipLabel());
+        }));
+        y += step;
+        this.addRenderableWidget(new Button(lx, y, bw, 20, arrowLabel(), b -> {
+            RouterunnerConfig cfg = RouterunnerConfig.get();
+            cfg.offscreenIndicator = !cfg.offscreenIndicator;
+            b.setMessage(arrowLabel());
+        }));
+
+        // right column — actions
+        y = top;
+        this.addRenderableWidget(new Button(rx, y, bw, 20, new TextComponent("Edit HUD Layout"),
+                b -> this.minecraft.setScreen(new HudEditorScreen(this))));
+        y += step;
+        this.addRenderableWidget(new Button(rx, y, bw, 20, new TextComponent("View Past Vaults"),
+                b -> this.minecraft.setScreen(new HistoryScreen(this))));
+        y += step;
+        this.addRenderableWidget(new Button(rx, y, bw, 20, new TextComponent("New Lap"), b -> {
+            int lap = ClientEvents.newLap();
+            b.setMessage(new TextComponent(lap > 0 ? "Lap " + lap + " started ✓" : "New Lap (not in a vault)"));
+        }));
+        y += step;
+        this.addRenderableWidget(new Button(rx, y, bw, 20, new TextComponent("Open Log Folder"),
+                b -> openLogFolder()));
+        y += step;
+        this.addRenderableWidget(new Button(rx, y, bw, 20, new TextComponent("Adjust Weights"),
+                b -> this.minecraft.setScreen(new WeightsScreen(this))));
+        y += step;
+        this.addRenderableWidget(new Button(rx, y, bw, 20, new TextComponent("Help"),
+                b -> this.minecraft.setScreen(new HelpScreen(this))));
+        y += step;
+        this.addRenderableWidget(new Button(rx, y, bw, 20, lookaheadLabel(), b -> {
+            RouterunnerConfig cfg = RouterunnerConfig.get();
+            cfg.lookahead = nextLookahead(cfg.lookahead);
+            RouterunnerConfig.save();
+            b.setMessage(lookaheadLabel());
+        }));
+
+        this.addRenderableWidget(new Button(cx - 100, top + rows * step + 14, 200, 20,
+                new TextComponent("Done"), b -> this.onClose()));
+    }
+
+    /** Start the columns high enough that the longer one AND the Done button below it still fit the screen. */
+    private int topFor(int rows, int step) {
+        int needed = rows * step + 14 + 20;
+        int t = this.height / 4;
+        if (t + needed > this.height - 4) t = this.height - 4 - needed;
+        return Math.max(24, t);
+    }
+
+    private static void openLogFolder() {
+        try {
+            Files.createDirectories(RunLog.runsDir());
+            Util.getPlatform().openFile(RunLog.runsDir().toFile());
+        } catch (Exception e) {
+            LogUtils.getLogger().error("[Routerunner] failed to open log folder", e);
+        }
+    }
+
+    private Component enabledLabel() {
+        return new TextComponent("Routerunner: " + (RouterunnerConfig.get().enabled ? "Enabled" : "Disabled"));
+    }
+
+    private Component routingLabel() {
+        return new TextComponent("Routing: " + (RouterunnerConfig.get().routingEnabled ? "Enabled" : "Disabled"));
+    }
+
+    private Component trackedLabel() {
+        return new TextComponent("Track loot: " + RouterunnerConfig.get().trackedChest.name());
+    }
+
+    private Component diffLabel() {
+        return new TextComponent("Diff Route: " + (RouterunnerConfig.get().diffRoute ? "On" : "Off"));
+    }
+
+    private Component hunterLabel() {
+        return new TextComponent("Hunter boxes: " + (RouterunnerConfig.get().suppressHunter ? "Hidden" : "Shown"));
+    }
+
+    private Component adaptiveLabel() {
+        return new TextComponent("Adaptive Weights: " + (RouterunnerConfig.get().adaptiveWeights ? "On" : "Off"));
+    }
+
+    private Component missedSkipLabel() {
+        return new TextComponent("Missed-waypoint skip: " + (RouterunnerConfig.get().missedSkip ? "On" : "Off"));
+    }
+
+    private Component arrowLabel() {
+        return new TextComponent("Target arrow: " + (RouterunnerConfig.get().offscreenIndicator ? "On" : "Off"));
+    }
+
+    private Component lookaheadLabel() {
+        return new TextComponent("Lookahead: " + RouterunnerConfig.get().lookahead);
+    }
+
+    /** Telegraph depth cycle (waypoints drawn ahead of the cursor); an off-list value snaps back to the first step. */
+    private static int nextLookahead(int cur) {
+        int[] steps = {3, 5, 8, 12};
+        for (int i = 0; i < steps.length; i++) {
+            if (steps[i] == cur) return steps[(i + 1) % steps.length];
+        }
+        return steps[0];
+    }
+
+    private static RouterunnerConfig.TrackedChest nextTracked(RouterunnerConfig.TrackedChest cur) {
+        RouterunnerConfig.TrackedChest[] v = RouterunnerConfig.TrackedChest.values();
+        return v[(cur.ordinal() + 1) % v.length];
+    }
+
+    @Override
+    public void render(PoseStack poseStack, int mouseX, int mouseY, float partialTicks) {
+        this.renderBackground(poseStack);
+        drawCenteredString(poseStack, this.font, this.title, this.width / 2, this.top - 20, 0xFFFFFF);
+        super.render(poseStack, mouseX, mouseY, partialTicks);
+    }
+
+    @Override
+    public void onClose() {
+        RouterunnerConfig.save();
+        if (this.minecraft != null) {
+            this.minecraft.setScreen(this.parent);
+        }
+    }
+
+    @Override
+    public boolean isPauseScreen() {
+        return false;
+    }
+}

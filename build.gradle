@@ -1,0 +1,53 @@
+plugins {
+    id 'eclipse'
+    id 'idea'
+    id 'net.minecraftforge.gradle' version '5.1.+'
+}
+
+version = '0.17.0'
+group = 'com.routerunner'
+archivesBaseName = 'Routerunner'
+
+java.toolchain.languageVersion = JavaLanguageVersion.of(17)
+
+minecraft {
+    // Mojang official mappings — code is written against readable names (Minecraft.getInstance(), etc.)
+    mappings channel: 'official', version: '1.18.2'
+
+    runs {
+        client {
+            workingDirectory project.file('run')
+            property 'forge.logging.markers', 'REGISTRIES'
+            property 'forge.logging.console.level', 'debug'
+            mods {
+                routerunner {
+                    source sourceSets.main
+                }
+            }
+        }
+    }
+}
+
+dependencies {
+    minecraft 'net.minecraftforge:forge:1.18.2-40.2.21'
+    // Chests are matched by registry id (string) — no coupling there.
+    // BUT robust, backpack-safe loot pickup detection requires subscribing to the_vault's
+    // CommonEvents.NEW_PICKUP_EVENT (it fires client-side for both normal and backpack pickups),
+    // and reading gear rarity needs VaultGearData. compileOnly: the_vault/vhapi are provided by
+    // the pack at runtime, not bundled. The pickup hook is guarded by ModList.isLoaded("the_vault").
+    compileOnly fg.deobf(files("libs/${vault_jar}"))
+    compileOnly fg.deobf(files("libs/${vhapi_jar}"))
+}
+
+jar {
+    manifest {
+        attributes([
+            'Specification-Title'   : 'routerunner',
+            'Specification-Vendor'  : 'PoorMansPhysicist',
+            'Specification-Version' : '1',
+            'Implementation-Title'  : project.name,
+            'Implementation-Version': project.jar.archiveVersion,
+            'Implementation-Vendor' : 'PoorMansPhysicist'
+        ])
+    }
+}

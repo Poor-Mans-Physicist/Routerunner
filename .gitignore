@@ -1,0 +1,16 @@
+/*
+!/src/
+!/gradle/
+!/build.gradle
+!/settings.gradle
+!/gradle.properties
+!/gradlew
+!/gradlew.bat
+!/LICENSE
+!/README.md
+!/.gitignore
+!/.gitattributes
+!/.github/
+!/libs/
+/libs/*
+!/libs/README.md

@@ -1,0 +1,31 @@
+modLoader="javafml"
+loaderVersion="[40,)"
+license="GPL-3.0"
+issueTrackerURL="https://github.com/Poor-Mans-Physicist/Routerunner/issues"
+
+[[mods]]
+modId="routerunner"
+version="${file.jarVersion}"
+displayURL="https://github.com/Poor-Mans-Physicist/Routerunner"
+displayName="Routerunner"
+authors="PoorMansPhysicist"
+description='''
+Routerunner — clientside chest-looting tools for Wold's Vaults.
+Live chests/min metrics + per-chest-type loot rates on a draggable HUD, plus a per-room waypoint
+solver that draws the route to follow and logs per-waypoint movement/clear times. Open the menu with
+the [ key (rebindable in Controls).
+'''
+
+[[dependencies.routerunner]]
+    modId="forge"
+    mandatory=true
+    versionRange="[40,)"
+    ordering="NONE"
+    side="CLIENT"
+
+[[dependencies.routerunner]]
+    modId="minecraft"
+    mandatory=true
+    versionRange="[1.18.2,1.19)"
+    ordering="NONE"
+    side="CLIENT"
