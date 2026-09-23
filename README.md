@@ -7,11 +7,13 @@ that helps you loot more chests per minute in vaults.
   average that turns green or red when it runs more than 25 chests/min above or below the lap's active average, the
   lap's average room density (target chests per room, read at each room's first scan), and per-chest-type loot rates.
   Can also hide Hunter boxes.
-- **Lane route.** A planner solves each room as you enter it and draws the route on the floor: a chain of short runs
-  through the densest chests, a heat map over the chests each run will clear, green markers on the next cluster, purple
-  arrows wherever the route climbs, drops or dashes, and a green walk out when the room stops being worth it. The planner
-  is a bundled Rust library (about 0.2 s per room on Windows x64; a Java planner runs elsewhere) fitted to logged runs, and
-  it re-plans from where you stand if you leave the route. It assumes Chain Miner; without it the routes will be wrong.
+- **Lane route.** A planner solves each room as you enter it, and draws the route on the floor: a chain of short runs
+  through the densest chests, a heat map over the chests to mine, green markers on the next target cluster, purple
+  arrows for dashes, and a green exit path when the room becomes sparse enough to not be worth looting further.
+  It assumes Chain Miner; without it the routes will be wrong.
+- **Self Learning.** The solver is self learning, meaning it watches you while you play in real time and adapts
+  to your playstyle to create the fastest routes specific to the way you move. It takes some time to warm up,
+  but should generally make using the solver feel much better after using it for several minutes as it adapts.
 - **Vault history.** Every vault you finish is saved with its chest count, rates, modifiers and loot totals.
 - **Run logs.** Each vault writes a `vault_*.jsonl` file with the planned routes, your path, every chest break and the
   per-room comparison of your run with the reference solver's, which is what the planner's timing model is fitted on.
