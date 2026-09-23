@@ -78,6 +78,61 @@ public final class RouteService {
     private static volatile SolvedRoute current = null;
     /** Cell key of the in-flight solve, or NO_CELL. */
     private static volatile long solvingCell = NO_CELL;
+    /** Cell key of the in-flight prefetch solve (the room ahead, solved while the player is still in the hallway), or NO_CELL. */
+    private static volatile long prefetchingCell = NO_CELL;
+    /** A finished prefetch waiting for the player to enter its cell. */
+    private static volatile SolvedRoute prefetched = null;
+    /** Wall clock before which no new prefetch is attempted (chunks not loaded, etc.). */
+    private static long prefetchRetryMs = 0;
+    /** The last native-planner status written to the log, so it is reported once per change. */
+    private static volatile String nativeStatusLogged = "";
+    /** Cells with at most this many target chests count as hallways for the look-ahead. */
+    private static final int HALLWAY_MAX_CHESTS = 24;
+
+    /**
+     * The running realized chest rate (breaks over the last two active minutes) and the live model-to-real time
+     * ratio (realized seconds on engaged runs over the model's seconds for them, with a prior), which together turn
+     * the config's {@code laneBailRateFrac} into an absolute lane bail in model chests per second.
+     */
+    static final class RateCal {
+        static final long WINDOW_MS = 120_000;
+        static final int MIN_BREAKS = 50;
+        static final long MIN_SPAN_MS = 20_000;
+        static final double PRIOR_RATIO = 1.8, PRIOR_W = 5.0;
+        private static final java.util.ArrayDeque<Long> breaks = new java.util.ArrayDeque<>();
+        private static double plannedS = 0, realizedS = 0;
+
+        static synchronized void onBreak(long activeMs) {
+            breaks.addLast(activeMs);
+            while (!breaks.isEmpty() && activeMs - breaks.peekFirst() > WINDOW_MS) breaks.pollFirst();
+        }
+
+        static synchronized void observe(double planned, double realized) {
+            plannedS += planned;
+            realizedS += realized;
+        }
+
+        static synchronized double ratio() {
+            return Math.max(1.0, Math.min(4.0, (PRIOR_RATIO * PRIOR_W + realizedS) / (PRIOR_W + plannedS)));
+        }
+
+        static synchronized double rate(long activeMs) {
+            if (breaks.size() < MIN_BREAKS) return 0.0;
+            long span = activeMs - breaks.peekFirst();
+            if (span < MIN_SPAN_MS) return 0.0;
+            return breaks.size() / (span / 1000.0);
+        }
+
+        static synchronized double bailFloor(RouterunnerConfig cfg, long activeMs) {
+            return Math.max(0.0, cfg.laneBailRateFrac) * rate(activeMs) * ratio();
+        }
+
+        static synchronized void reset() {
+            breaks.clear();
+            plannedS = 0;
+            realizedS = 0;
+        }
+    }
     /** Status line for the HUD. */
     private static volatile String lastState = "idle";
     private static volatile String lastLoggedState = null;
@@ -116,12 +171,14 @@ public final class RouteService {
     /** Vault entry/exit: flush the last room to the adaptive weights and diff, then clear all route and session state. */
     public static void reset() {
         if (measuredRoom != null) {
-            AdaptiveWeights.get().observeRoom(measuredRoom);
             finalizeRoomForDiff(measuredRoom);
         }
         lastAccuracyPct = -1;
         current = null;
         solvingCell = NO_CELL;
+        prefetchingCell = NO_CELL;
+        prefetched = null;
+        RateCal.reset();
         setState("idle");
         sessionHotSpotSum = 0;
         roomsForHotSpot = 0;
@@ -142,11 +199,6 @@ public final class RouteService {
 
     private static void tick(Level level, Player player) {
         RouterunnerConfig cfg = RouterunnerConfig.get();
-        // diff mode and adaptive weights need a solved route even when routing is hidden
-        if (!cfg.routingEnabled && !cfg.diffRoute && !cfg.adaptiveWeights) {
-            if (current != null) reset();
-            return;
-        }
 
         BlockPos pp = player.blockPosition();
         int rx = Math.floorDiv(pp.getX(), RoomGeometry.CELL);
@@ -167,6 +219,8 @@ public final class RouteService {
                     counts = ac;
                 }
             }
+        } else if (total(counts) <= HALLWAY_MAX_CHESTS) {
+            maybePrefetch(level, player, rx, rz, cfg);
         }
 
         if (counts == null) {
@@ -193,12 +247,20 @@ public final class RouteService {
                 cur.roomId = roomId;
                 RunLog.roomId(cellKey, roomId);
             }
-            if (cfg.diffRoute || cfg.adaptiveWeights) captureTrail(level, cur, player);
+            captureTrail(level, cur, player);
             if (cfg.routingEnabled) {
                 advance(level, player, cur);
                 int wpTotal = cur.plan.waypoints.size();
                 String suffix = cur.cursor >= wpTotal ? "done → EXIT" : (Math.min(cur.cursor + 1, wpTotal) + "/" + wpTotal);
-                setState("route " + suffix + " [" + cur.targetType + "]");
+                if (cur.lane != null) {
+                    laneTick(level, player, cur, cfg);
+                    com.routerunner.lane.LaneRoute lr = cur.lane;
+                    int nLaneRuns = lr.runs.size() - (lr.runs.get(lr.runs.size() - 1).exit ? 1 : 0);
+                    suffix = lr.finished() ? "at exit" : (lr.current().exit ? "lane → exit" : ("lane " + (lr.cur + 1) + "/" + nLaneRuns));
+                    setState("route " + suffix + " [" + lr.mode + "]");
+                } else {
+                    setState("route " + suffix + " [" + cur.targetType + "]");
+                }
             } else {
                 setState("diff tracking [" + cur.targetType + "]");
             }
@@ -206,6 +268,20 @@ public final class RouteService {
         }
 
         if (solvingCell == cellKey) {
+            setState("solving…");
+            return;
+        }
+        SolvedRoute pre = prefetched;
+        if (pre != null && pre.cellKey == cellKey) {
+            prefetched = null;
+            if (pre.targetsWorld.size() == total(counts)) {
+                adoptPrefetched(pre, roomId);
+                return;
+            }
+            LOG.info("[Routerunner] prefetched route for {} discarded: {} chests at prefetch, {} now; solving fresh.",
+                    roomId == null ? "?" : shortRoom(roomId), pre.targetsWorld.size(), total(counts));
+        }
+        if (prefetchingCell == cellKey) {
             setState("solving…");
             return;
         }
@@ -224,36 +300,95 @@ public final class RouteService {
             return;
         }
         setState("solving…");
-
-        final String fRoomId = roomId;
-        final String fType = targetType;
-        final RoutePlanner.Params params = buildParams(cfg);
         solvingCell = cellKey;
+        submitSolve(snap, cellKey, roomId, targetType, cfg, buildParams(), fGeomMs, false);
+    }
+
+    /**
+     * While the player crosses a hallway, solve the room ahead (by travel direction) in the background so its route
+     * is ready the moment they step in. Skipped when the room ahead is not fully loaded yet (retried shortly),
+     * has no target chests, is on the skip list, or is already current, solving or prefetched.
+     */
+    private static void maybePrefetch(Level level, Player player, int rx, int rz, RouterunnerConfig cfg) {
+        int[] ahead = aheadCell(player, rx, rz);
+        if (ahead[0] == rx && ahead[1] == rz) return;
+        long key = (((long) ahead[0]) << 32) ^ (ahead[1] & 0xFFFFFFFFL);
+        SolvedRoute cur = current;
+        SolvedRoute pre = prefetched;
+        if ((cur != null && cur.cellKey == key) || solvingCell == key || prefetchingCell == key || (pre != null && pre.cellKey == key)) return;
+        long now = System.currentTimeMillis();
+        if (now < prefetchRetryMs) return;
+        prefetchRetryMs = now + 400;
+        int[] ac = RoomGeometry.scanCounts(level, ahead[0], ahead[1]);
+        if (ac == null || total(ac) <= HALLWAY_MAX_CHESTS) return;
+        String roomId = safeRoomId(ahead[0], ahead[1], player);
+        if (roomId != null && isSkipped(cfg, roomId)) return;
+        String targetType = resolveTargetType(cfg, ac);
+        long geomStartNs = System.nanoTime();
+        RoomGeometry.Snapshot snap = RoomGeometry.build(level, ahead[0], ahead[1], targetType, player.blockPosition());
+        long geomMs = (System.nanoTime() - geomStartNs) / 1_000_000L;
+        if (snap == null || snap.targetsLocal.isEmpty()) return;
+        prefetchingCell = key;
+        submitSolve(snap, key, roomId, targetType, cfg, buildParams(), geomMs, true);
+    }
+
+    /** Make a prefetched route current now that the player has entered its cell, and log it as solved. */
+    private static void adoptPrefetched(SolvedRoute pre, String roomId) {
+        long now = MetricsTracker.get().getActiveMs();
+        pre.prefetchLeadMs = Math.max(0, now - pre.solvedActiveMs);
+        pre.startActiveMs = now;
+        pre.lastWpActiveMs = now;
+        if (pre.roomId == null && roomId != null) pre.roomId = roomId;
+        current = pre;
+        RunLog.roomSolve(pre);
+        if (pre.lane != null) RunLog.lanePlan(pre.cellKey, pre.roomId, pre.lane.mode, "solve", pre.lane.plan.lanes.size(), pre.lane);
+        LOG.info("[Routerunner] Adopted the prefetched route for {} ({} chests, ready {} ms before entry).",
+                pre.roomId, pre.targetsWorld.size(), pre.prefetchLeadMs);
+    }
+
+    /** Solve a snapshot on the solver thread: the waypoint route, then the lane plan; publish as current or as prefetched. */
+    private static void submitSolve(RoomGeometry.Snapshot snap, long cellKey, String roomId, String targetType, RouterunnerConfig cfg,
+                                    RoutePlanner.Params params, long geomMs, boolean prefetch) {
         final long submitNs = System.nanoTime();
         SOLVER.submit(() -> {
             try {
                 long startNs = System.nanoTime();
                 RoutePlan plan = RoutePlanner.planRoute(snap.grid, snap.targetsLocal, snap.entranceLocal, snap.exitLocal, params);
                 long doneNs = System.nanoTime();
-                SolvedRoute sr = new SolvedRoute(cellKey, snap.ox, snap.oy, snap.oz, fRoomId, fType, plan, snap.targetsWorld,
-                        snap.othersLocal, snap.otherIds, snap.exitLocal, snap.grid, params);
-                sr.geomMs = fGeomMs;
+                SolvedRoute sr = new SolvedRoute(cellKey, snap.ox, snap.oy, snap.oz, roomId, targetType, plan, snap.targetsWorld,
+                        snap.othersLocal, snap.otherIds, snap.exitLocal, snap.grid, params, snap.entranceLocal);
+                sr.geomMs = geomMs;
                 sr.queueMs = (startNs - submitNs) / 1_000_000L;
                 sr.solveMs = (doneNs - startNs) / 1_000_000L;
+                long laneStart = System.nanoTime();
+                sr.lane = solveLanes(sr, snap.targetsLocal, snap.entranceLocal, cfg, "solve", 0.0, !prefetch);
+                sr.laneMs = (System.nanoTime() - laneStart) / 1_000_000L;
+                LOG.info("[Routerunner] Lane plan for {}: {} runs in {} ms{}{}.", roomId,
+                        sr.lane == null ? "no" : sr.lane.runs.size(), sr.laneMs, prefetch ? " (prefetch)" : "",
+                        sr.lane != null && sr.lane.planner.isNative() ? " [rust]" : " [java]");
                 sr.areaTotal = areaTotals(sr);
-                sr.startActiveMs = MetricsTracker.get().getActiveMs();
-                sr.lastWpActiveMs = sr.startActiveMs;
-                current = sr;
-                RunLog.roomSolve(sr);
-                LOG.info("[Routerunner] Solved {} ({} chests, {} waypoints, {}% planned, chain {}/{}, speed {}) in {} ms (geometry {} ms, queued {} ms).", fRoomId,
-                        snap.targetsLocal.size(), plan.waypoints.size(),
-                        snap.targetsLocal.isEmpty() ? 0 : (100 * plan.collected / snap.targetsLocal.size()),
-                        params.chainRange, params.chainLimit, String.format(Locale.ROOT, "%.3f", params.speedAttr),
-                        sr.solveMs, sr.geomMs, sr.queueMs);
+                long now = MetricsTracker.get().getActiveMs();
+                sr.solvedActiveMs = now;
+                sr.startActiveMs = now;
+                sr.lastWpActiveMs = now;
+                if (prefetch) {
+                    prefetched = sr;
+                    LOG.info("[Routerunner] Prefetched {} ({} chests) in {} ms while still in the hallway.", roomId,
+                            snap.targetsLocal.size(), sr.solveMs + Math.max(0, sr.laneMs));
+                } else {
+                    current = sr;
+                    RunLog.roomSolve(sr);
+                    LOG.info("[Routerunner] Solved {} ({} chests, {} waypoints, {}% planned, chain {}/{}, speed {}) in {} ms (geometry {} ms, queued {} ms).", roomId,
+                            snap.targetsLocal.size(), plan.waypoints.size(),
+                            snap.targetsLocal.isEmpty() ? 0 : (100 * plan.collected / snap.targetsLocal.size()),
+                            params.chainRange, params.chainLimit, String.format(Locale.ROOT, "%.3f", params.speedAttr),
+                            sr.solveMs, sr.geomMs, sr.queueMs);
+                }
             } catch (Throwable t) {
                 LOG.error("[Routerunner] solve failed", t);
             } finally {
-                solvingCell = NO_CELL;
+                if (prefetch) prefetchingCell = NO_CELL;
+                else solvingCell = NO_CELL;
             }
         });
     }
@@ -280,7 +415,7 @@ public final class RouteService {
 
         RoutePlan.WP cw = sr.plan.waypoints.get(sr.cursor);
 
-        if (RouterunnerConfig.get().missedSkip && maybeSkipMissed(level, player, sr, cw, activeMs, goneNow)) return;
+        if (maybeSkipMissed(level, player, sr, cw, activeMs, goneNow)) return;
 
         // forward-progress skip: most waypoints ahead are already clear
         int look = 0, aheadClear = 0;
@@ -313,7 +448,7 @@ public final class RouteService {
             return;
         }
         double gone = goneFrac(sr, sr.cursor, rem);
-        boolean spent = rem <= Math.max(0, RouterunnerConfig.get().stragglerSkip) || gone >= SPENT_GONE_FRAC;
+        boolean spent = rem <= STRAGGLER_SKIP || gone >= SPENT_GONE_FRAC;
         if (spent && activeMs - sr.lastSkipMs >= SKIP_COOLDOWN_MS) {
             LOG.info("[Routerunner] spent waypoint {} ({} chest(s) left, {}% of its cluster gone) — continuing to the next",
                     sr.cursor, rem, (int) Math.round(100.0 * gone));
@@ -378,7 +513,7 @@ public final class RouteService {
 
     /**
      * Discard the cursor's waypoint as a {@code skip} and move to the next one, rolling the leg bookkeeping
-     * forward as a reach would. Does not feed {@link AdaptiveWeights}.
+     * forward as a reach would.
      */
     private static void skipWaypoint(SolvedRoute sr, RoutePlan.WP wp, String reason, long activeMs, int goneNow) {
         logSkip(sr, world(sr, wp.pos), reason);
@@ -416,7 +551,6 @@ public final class RouteService {
         } else {
             RunLog.reach(sr.cellKey, sr.roomId, sr.targetType, sr.cursor, wpos, wp.segMode,
                     plannedDist, actualCleared, wp.plannedCleared, dt, sr.tpSinceWp);
-            if (sr.tpSinceWp == 0) AdaptiveWeights.get().observeLeg(wp.segMode, plannedDist, dt);
         }
         sr.goneAtLastWp = goneNow;
         sr.lastWpActiveMs = activeMs;
@@ -425,10 +559,12 @@ public final class RouteService {
         sr.cursor++;
     }
 
-    /** True if the waypoint's trigger is gone and at most {@code stragglerSkip} chests remain in its area. */
+    /** Once a waypoint's trigger chest is gone it counts as done when at most this many chests remain in its area. */
+    private static final int STRAGGLER_SKIP = 3;
+
+    /** True if the waypoint's trigger is gone and at most {@link #STRAGGLER_SKIP} chests remain in its area. */
     private static boolean stragglerDone(Level level, SolvedRoute sr, int cursor) {
-        int skip = Math.max(0, RouterunnerConfig.get().stragglerSkip);
-        if (skip <= 0) return false;
+        int skip = STRAGGLER_SKIP;
         P wp = sr.plan.waypoints.get(cursor).pos;
         if (isTargetChestAt(level, world(sr, wp), sr.targetType)) return false;
         return countRemainingInArea(level, sr, wp) <= skip;
@@ -502,6 +638,169 @@ public final class RouteService {
         return gone;
     }
 
+    /**
+     * Solve (or re-solve) the lane plan for a room from a start cell and a chest set, on the calling thread.
+     * Returns null, with an error logged, when the planner throws or finds nothing to sweep.
+     */
+    private static com.routerunner.lane.LaneRoute solveLanes(SolvedRoute sr, java.util.List<P> chestsLocal, P startLocal,
+                                                             RouterunnerConfig cfg, String reason, double opportunityFloor, boolean log) {
+        try {
+            if (chestsLocal == null || chestsLocal.isEmpty() || sr.grid == null) return null;
+            com.routerunner.lane.LanePlanner.Params lp = new com.routerunner.lane.LanePlanner.Params();
+            lp.pointMode = true;
+            lp.bailAggression = cfg.laneBail;
+            lp.opportunityFloor = opportunityFloor;
+            lp.exitWeight = cfg.laneExitWeight;
+            lp.bailFloor = RateCal.bailFloor(cfg, MetricsTracker.get().getActiveMs());
+            lp.useNative = cfg.laneNative;
+            if (cfg.laneNative) {
+                com.routerunner.lane.NativeLane.init(net.minecraftforge.fml.loading.FMLPaths.CONFIGDIR.get().resolve("routerunner").resolve("natives"));
+                String st = com.routerunner.lane.NativeLane.status();
+                if (!st.equals(nativeStatusLogged)) {
+                    nativeStatusLogged = st;
+                    if (com.routerunner.lane.NativeLane.ready()) LOG.info("[Routerunner] native lane planner: {}", st);
+                    else LOG.warn("[Routerunner] native lane planner unavailable ({}); planning lanes in Java.", st);
+                }
+            }
+            com.routerunner.lane.LegTimeModel model = com.routerunner.lane.LegTimeModel.forGame(
+                    net.minecraftforge.fml.loading.FMLPaths.CONFIGDIR.get().resolve("routerunner").resolve("legmodel.json"));
+            com.routerunner.lane.LanePlanner planner = new com.routerunner.lane.LanePlanner(
+                    sr.grid, chestsLocal, sr.params.chainRange, sr.params.chainLimit, lp, model);
+            P start = com.routerunner.lane.Grid.snapInside(sr.grid, startLocal == null ? sr.exitLocal : startLocal);
+            P exit = com.routerunner.lane.Grid.snapInside(sr.grid, sr.exitLocal);
+            com.routerunner.lane.LanePlanner.Plan plan = planner.plan(start, exit);
+            if (plan.lanes.isEmpty()) {
+                LOG.error("[Routerunner] lane planner found nothing to sweep in {} ({}); falling back to the waypoint route.", sr.roomId, reason);
+                return null;
+            }
+            if (plan.exitStraight) {
+                LOG.warn("[Routerunner] no ground path and no flight within 3 hops to the exit of {} from the last lane ({}); the exit run is a straight line through whatever is in the way.",
+                        sr.roomId, reason);
+            }
+            com.routerunner.lane.LaneRoute lr = new com.routerunner.lane.LaneRoute(planner, plan, lp.pointMode ? "point" : "corridor",
+                    sr.ox, sr.oy, sr.oz, MetricsTracker.get().getActiveMs());
+            if (log) RunLog.lanePlan(sr.cellKey, sr.roomId, lr.mode, reason, plan.lanes.size(), lr);
+            return lr;
+        } catch (Throwable t) {
+            LOG.error("[Routerunner] lane planner failed for {} ({}); falling back to the waypoint route.", sr.roomId, reason, t);
+            return null;
+        }
+    }
+
+    /**
+     * Replan on the room's existing planner (its reach, component, landing and exit caches survive) over the chests
+     * still standing, from the player's cell, keeping the first solve's opportunity as the bail anchor. A plan with
+     * no lanes left is still returned when it has an exit walk, so the player is led out rather than left blank.
+     */
+    private static com.routerunner.lane.LaneRoute replanLanes(SolvedRoute sr, com.routerunner.lane.LaneRoute old, boolean[] mask,
+                                                              P startLocal, RouterunnerConfig cfg, String reason) {
+        try {
+            com.routerunner.lane.LanePlanner planner = old.planner;
+            planner.P.opportunityFloor = old.plan.opportunity;
+            planner.P.bailAggression = cfg.laneBail;
+            planner.P.exitWeight = cfg.laneExitWeight;
+            planner.P.bailFloor = RateCal.bailFloor(cfg, MetricsTracker.get().getActiveMs());
+            P start = com.routerunner.lane.Grid.snapInside(sr.grid, startLocal == null ? sr.exitLocal : startLocal);
+            P exit = com.routerunner.lane.Grid.snapInside(sr.grid, sr.exitLocal);
+            com.routerunner.lane.LanePlanner.Plan plan = planner.plan(start, exit, mask);
+            if (plan.lanes.isEmpty() && (plan.exitPath == null || plan.exitPath.isEmpty())) {
+                LOG.error("[Routerunner] lane replan found nothing to sweep and no exit walk in {} ({}); keeping the old plan.", sr.roomId, reason);
+                return null;
+            }
+            if (plan.exitStraight) {
+                LOG.warn("[Routerunner] no ground path and no flight within 3 hops to the exit of {} from the last lane ({}); the exit run is a straight line through whatever is in the way.",
+                        sr.roomId, reason);
+            }
+            com.routerunner.lane.LaneRoute lr = new com.routerunner.lane.LaneRoute(planner, plan, old.mode, sr.ox, sr.oy, sr.oz,
+                    MetricsTracker.get().getActiveMs());
+            RunLog.lanePlan(sr.cellKey, sr.roomId, lr.mode, reason, plan.lanes.size(), lr);
+            return lr;
+        } catch (Throwable t) {
+            LOG.error("[Routerunner] lane replan failed for {} ({}); keeping the old plan.", sr.roomId, reason, t);
+            return null;
+        }
+    }
+
+    /** The lane follow rules for one client tick, plus heat refresh, tracer scheduling, and boundary/off-lane replans. */
+    private static void laneTick(Level level, Player player, SolvedRoute sr, RouterunnerConfig cfg) {
+        com.routerunner.lane.LaneRoute lr = sr.lane;
+        if (lr == null) return;
+        java.util.function.Predicate<BlockPos> alive = pos -> isTargetChestAt(level, pos, sr.targetType);
+        long now = MetricsTracker.get().getActiveMs();
+        if (lr.heatDue(now)) lr.recomputeHeat(alive, now);
+        if (lr.finished()) return;
+        com.routerunner.lane.LaneRoute.Event ev = lr.tick(player, alive, now);
+        if (lr.tracerDue(now)) {
+            Vec3 pp = player.position();
+            P pl = new P((int) Math.floor(pp.x) - sr.ox, (int) Math.floor(pp.y) - sr.oy, (int) Math.floor(pp.z) - sr.oz);
+            lr.tracerBusy = true;
+            lr.tracerMs = now;
+            SOLVER.submit(() -> {
+                try {
+                    lr.computeTracer(pl);
+                } catch (Throwable t) {
+                    LOG.error("[Routerunner] lane tracer failed for {}; the off-lane guide line stays off until the next attempt.", sr.roomId, t);
+                } finally {
+                    lr.tracerBusy = false;
+                }
+            });
+        }
+        if (ev == com.routerunner.lane.LaneRoute.Event.NONE) return;
+        com.routerunner.lane.LaneRoute.Run r = lr.current();
+        int ahead = r == null ? 0 : lr.aliveAhead(r, lr.prog, alive);
+        if (ev == com.routerunner.lane.LaneRoute.Event.DONE) {
+            RunLog.laneEvent(sr.cellKey, "done", lr.cur, lr.runs.size(), lr.lastDone, ahead, lr.prog);
+            if (lr.engaged && r != null && !r.exit) {
+                double realized = (now - lr.runStartMs) / 1000.0;
+                if (realized > 0.5 && r.seconds > 0.05) RateCal.observe(r.seconds, realized);
+            }
+            lr.advance(player, now);
+            com.routerunner.lane.LaneRoute.Run nx = lr.current();
+            if (nx == null) {
+                RunLog.laneEvent(sr.cellKey, "finished", lr.cur, lr.runs.size(), "plan", 0, 0);
+                return;
+            }
+            if (!nx.exit && lr.stale(nx, alive)) laneReplan(level, player, sr, cfg, "stale");
+            else RunLog.laneEvent(sr.cellKey, "advance", lr.cur, lr.runs.size(), nx.exit ? "exit" : "next", lr.aliveTotal(nx, alive), lr.prog);
+        } else {
+            RunLog.laneEvent(sr.cellKey, "off", lr.cur, lr.runs.size(), "off-lane", ahead, lr.prog);
+            laneReplan(level, player, sr, cfg, "off");
+        }
+    }
+
+    /** Replan the lanes from the player's position over the chests still standing, rate-limited, on the solver thread. */
+    private static void laneReplan(Level level, Player player, SolvedRoute sr, RouterunnerConfig cfg, String reason) {
+        com.routerunner.lane.LaneRoute lr = sr.lane;
+        long now = MetricsTracker.get().getActiveMs();
+        if (lr == null || sr.laneSolving || now - lr.lastReplanMs < com.routerunner.lane.LaneRoute.REPLAN_MIN_MS) {
+            RunLog.laneEvent(sr.cellKey, "replan-skipped", lr == null ? -1 : lr.cur, lr == null ? 0 : lr.runs.size(),
+                    sr.laneSolving ? "in-flight" : "rate-limit", 0, lr == null ? 0 : lr.prog);
+            return;
+        }
+        boolean[] mask = lr.aliveMask(pos -> isTargetChestAt(level, pos, sr.targetType));
+        int liveN = 0;
+        for (boolean b : mask) if (b) liveN++;
+        Vec3 pp = player.position();
+        P startLocal = new P((int) Math.floor(pp.x) - sr.ox, (int) Math.floor(pp.y) - sr.oy, (int) Math.floor(pp.z) - sr.oz);
+        sr.laneSolving = true;
+        lr.lastReplanMs = now;
+        RunLog.laneEvent(sr.cellKey, "replan", lr.cur, lr.runs.size(), reason, liveN, lr.prog);
+        SOLVER.submit(() -> {
+            try {
+                long t0 = System.nanoTime();
+                com.routerunner.lane.LaneRoute fresh = replanLanes(sr, lr, mask, startLocal, cfg, reason);
+                LOG.info("[Routerunner] Lane replan ({}) for {}: {} runs in {} ms.", reason, sr.roomId,
+                        fresh == null ? "no" : fresh.runs.size(), (System.nanoTime() - t0) / 1_000_000L);
+                if (fresh != null) {
+                    fresh.lastReplanMs = now;
+                    if (current == sr) sr.lane = fresh;
+                }
+            } finally {
+                sr.laneSolving = false;
+            }
+        });
+    }
+
     private static boolean isTargetChestAt(Level level, BlockPos pos, String targetType) {
         if (!level.isLoaded(pos)) return true; // unloaded counts as present
         ResourceLocation id = ForgeRegistries.BLOCKS.getKey(level.getBlockState(pos).getBlock());
@@ -529,59 +828,23 @@ public final class RouteService {
         return RoomGeometry.TYPES[best];
     }
 
-    /** Solver weights from config, session bail, Chain Miner tier and player speed, with adaptive scaling applied. */
-    private static RoutePlanner.Params buildParams(RouterunnerConfig cfg) {
+    /**
+     * The reference solver's parameters: its built-in tuned weights (fixed; the lane planner is what the player
+     * follows), the session bail, the Chain Miner tier and the player's speed.
+     */
+    private static RoutePlanner.Params buildParams() {
         RoutePlanner.Params p = new RoutePlanner.Params();
-        p.bail = dynamicBail(cfg);
-        p.bailAggression = cfg.bailAggression;
-        p.tightMult = cfg.tightMult;
-        p.narrowMult = cfg.narrowMult;
-        p.midMult = cfg.midMult;
-        p.clearanceMin = cfg.clearanceMin;
-        p.openSatClearance = cfg.openSatClearance;
-        p.corePenaltyWeight = cfg.corePenaltyWeight;
-        p.proximityBonus = cfg.proximityBonus;
-        p.proximityRadius = cfg.proximityRadius;
-        p.proximityRadiusOpen = cfg.proximityRadiusOpen;
-        p.abovePathWeight = cfg.abovePathWeight;
-        p.enclosureWeight = cfg.enclosureWeight;
-        p.upCost = cfg.upCost;
-        p.downCost = cfg.downCost;
-        p.turnWeight = cfg.turnWeight;
-        p.turnOpenFactor = cfg.turnOpenFactor;
-        p.pathTurnWeight = cfg.pathTurnWeight;
-        p.losRequired = cfg.losRequired;
-        p.breakReach = cfg.breakReach;
-        p.waypointOverhead = cfg.waypointOverhead;
-        p.tridentActionCost = cfg.tridentActionCost;
-        p.tridentDistWeight = cfg.tridentDistWeight;
-        p.tridentMinDist = cfg.tridentMinDist;
-        p.shaftMinVertical = cfg.shaftMinVertical;
-        p.shaftMaxLen = cfg.shaftMaxLen;
-        p.shaftMinSaving = cfg.shaftMinSaving;
-        p.shaftMinSavingHoriz = cfg.shaftMinSavingHoriz;
-        p.shaftCapVertical = cfg.shaftCapVertical;
-        p.shaftCapHoriz = cfg.shaftCapHoriz;
-        p.shaftMaxDijkstra = cfg.shaftMaxDijkstra;
-        p.dropActionCost = cfg.dropActionCost;
-        p.dropHeightWeight = cfg.dropHeightWeight;
-        p.dropMaxHeight = cfg.dropMaxHeight;
-        p.openSprintWeight = cfg.openSprintWeight;
-        p.openSprintMinDist = cfg.openSprintMinDist;
-        p.openSprintMinClear = cfg.openSprintMinClear;
-        p.openSprintMaxRise = cfg.openSprintMaxRise;
-        p.turnaroundDeg = cfg.turnaroundDeg;
+        p.bail = roomsForHotSpot > 0 ? p.bailAggression * sessionHotSpotSum / roomsForHotSpot : 0.0;
         int[] chain = ChainMinerInfo.rangeAndLimit();
         p.chainRange = chain[0];
         p.chainLimit = chain[1];
         p.speedAttr = PlayerSpeed.attribute(Minecraft.getInstance().player);
-        AdaptiveWeights.get().apply(p, cfg);
         return p;
     }
 
-    /** The weight snapshot a solve would run with right now. */
+    /** The parameter snapshot a solve would run with right now. */
     public static RoutePlanner.Params snapshotParams() {
-        return buildParams(RouterunnerConfig.get());
+        return buildParams();
     }
 
     /**
@@ -589,6 +852,9 @@ public final class RouteService {
      * targets, append it to {@link SolvedRoute#userBreaks}.
      */
     public static void onChestBroken(BlockPos pos) {
+        RateCal.onBreak(MetricsTracker.get().getActiveMs());
+        SolvedRoute lsr = current;
+        if (lsr != null && lsr.lane != null) lsr.lane.heatDirty = true;
         SolvedRoute sr = current;
         if (sr == null || pos == null) return;
         sr.lastBreakMs = MetricsTracker.get().getActiveMs();
@@ -612,20 +878,7 @@ public final class RouteService {
     private static SolvedRoute measuredRoom = null;
     private static long measuredCellKey = NO_CELL;
 
-    /**
-     * Absolute bail for the next solve: the config override if set, else bailAggression × the vault's average
-     * hot-spot rate; 0 before any room is measured (the planner then uses the room's own hot-spot rate).
-     */
-    private static double dynamicBail(RouterunnerConfig cfg) {
-        if (cfg.bail > 0.0) return cfg.bail;
-        if (roomsForHotSpot > 0) {
-            double avgHot = sessionHotSpotSum / roomsForHotSpot;
-            return cfg.bailAggression * avgHot;
-        }
-        return 0.0;
-    }
-
-    /** Accumulate hallway travel; on a room change, finalize the previous room for bail, adaptive weights and diff. */
+    /** Accumulate hallway travel; on a room change, finalize the previous room for bail and the diff. */
     private static void updateBailMetrics(Player player, boolean playerInRoom) {
         Vec3 cur = player.position();
         if (lastPlayerPos != null) {
@@ -638,8 +891,7 @@ public final class RouteService {
         if (crt != null && crt.cellKey != measuredCellKey) {
             if (measuredRoom != null) {
                 finalizeRoomForBail(measuredRoom);
-                AdaptiveWeights.get().observeRoom(measuredRoom);
-                finalizeRoomForDiff(measuredRoom);
+                    finalizeRoomForDiff(measuredRoom);
             }
             crt.hallwayIn = pendingHallwayBlocks;
             pendingHallwayBlocks = 0;
@@ -690,7 +942,6 @@ public final class RouteService {
 
     /** Score the player's trail against the solver's ground route and log one diff record for the room. */
     private static void finalizeRoomForDiff(SolvedRoute room) {
-        if (!RouterunnerConfig.get().diffRoute) return;
         try {
             if (room.grid == null || room.userTrail.size() < 3 || room.userChests <= 0) {
                 LOG.info("[Routerunner] diff skipped for {} (trail {}, chests {})",
@@ -967,6 +1218,16 @@ public final class RouteService {
         public final RoutePlanner.Params params;
         /** Solve wall time, snapshot build time and solver-queue wait (ms); -1 until solved. */
         public volatile long solveMs = -1, geomMs = -1, queueMs = -1;
+        /** Lane plan wall time (ms), and how long before the player entered the cell a prefetched route was ready (-1 if not prefetched). */
+        public volatile long laneMs = -1, prefetchLeadMs = -1;
+        /** Active clock when the solve finished. */
+        long solvedActiveMs;
+        /** The lane plan being followed, or null for the waypoint route only. */
+        public volatile com.routerunner.lane.LaneRoute lane = null;
+        /** A lane replan is in flight on the solver thread. */
+        volatile boolean laneSolving = false;
+        /** Where the plan started (the waypoint solver's entrance), for replans and logging. */
+        public final P entranceLocal;
         /** Teleports since the last reached waypoint. */
         int tpSinceWp = 0;
         /** A teleport happened since the last trail sample. */
@@ -1018,6 +1279,13 @@ public final class RouteService {
         SolvedRoute(long cellKey, int ox, int oy, int oz, String roomId, String targetType,
                     RoutePlan plan, java.util.List<BlockPos> targetsWorld, java.util.List<P> otherChestsLocal,
                     java.util.List<String> otherChestIds, P exitLocal, SolidGrid grid, RoutePlanner.Params params) {
+            this(cellKey, ox, oy, oz, roomId, targetType, plan, targetsWorld, otherChestsLocal, otherChestIds, exitLocal, grid, params, null);
+        }
+
+        SolvedRoute(long cellKey, int ox, int oy, int oz, String roomId, String targetType,
+                    RoutePlan plan, java.util.List<BlockPos> targetsWorld, java.util.List<P> otherChestsLocal,
+                    java.util.List<String> otherChestIds, P exitLocal, SolidGrid grid, RoutePlanner.Params params, P entranceLocal) {
+            this.entranceLocal = entranceLocal;
             this.cellKey = cellKey;
             this.ox = ox;
             this.oy = oy;

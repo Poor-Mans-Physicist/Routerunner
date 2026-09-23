@@ -103,15 +103,18 @@ public final class RunLog {
         overflowLogged = false;
     }
 
-    /** First tick with a resolved vault id: stamps the profile, mod/weights version and the solver's weights. */
+    /** Version of the reference solver's built-in weights, stamped on vault_enter for the analysis tools. */
+    static final int REFERENCE_WEIGHTS_VERSION = 14;
+
+    /** First tick with a resolved vault id: stamps the mod version, reference-weights version and the solver's parameters. */
     public static synchronized void vaultEnter(String vaultId, int lap) {
         RouterunnerConfig cfg = RouterunnerConfig.get();
         StringBuilder sb = head("vault_enter", 512);
         sb.append(",\"vaultId\":").append(quote(vaultId))
-          .append(",\"profile\":").append(quote(cfg.profileName))
+          .append(",\"profile\":").append(quote("default"))
           .append(",\"modVersion\":").append(quote(Routerunner.MOD_VERSION))
           .append(",\"logVersion\":").append(LOG_VERSION)
-          .append(",\"weightsVersion\":").append(cfg.weightsVersion)
+          .append(",\"weightsVersion\":").append(REFERENCE_WEIGHTS_VERSION)
           .append(",\"dashSpec\":").append(quote(DashInfo.specId()))
           .append(",\"weights\":").append(weightsJson())
           .append(",\"lap\":").append(lap)
@@ -267,6 +270,61 @@ public final class RunLog {
         write(sb.toString(), true);
     }
 
+    /**
+     * The lane planner finished a room (or replanned it): mode, size, the model's predicted time and every run as a
+     * WORLD polyline with its yield, so the replay and the analysis can reconstruct exactly what was drawn.
+     */
+    public static synchronized void lanePlan(long cellKeyRaw, String roomId, String mode, String reason, int nLanes,
+                                             com.routerunner.lane.LaneRoute lr) {
+        try {
+            StringBuilder sb = head("lane_plan", 2048);
+            sb.append(",\"cellKey\":").append(quote(cellKey(cellKeyRaw)))
+              .append(",\"roomId\":").append(quote(roomId))
+              .append(",\"mode\":").append(quote(mode))
+              .append(",\"reason\":").append(quote(reason))
+              .append(",\"lanes\":").append(nLanes)
+              .append(",\"runs\":").append(lr.runs.size())
+              .append(",\"cover\":").append(r4(lr.plan.cover))
+              .append(",\"bail\":").append(r2(lr.plan.bail))
+              .append(",\"opportunity\":").append(r2(lr.plan.opportunity))
+              .append(",\"bailFloor\":").append(r2(lr.planner.P.bailFloor))
+              .append(",\"modelS\":").append(r2(lr.plan.tTotal))
+              .append(",\"yield\":").append(lr.plan.yieldTotal)
+              .append(",\"runList\":[");
+            for (int i = 0; i < lr.runs.size(); i++) {
+                com.routerunner.lane.LaneRoute.Run r = lr.runs.get(i);
+                if (i > 0) sb.append(',');
+                sb.append("{\"yield\":").append(r.yield).append(",\"s\":").append(r2(r.seconds)).append(",\"brush\":").append(r.brush.size())
+                  .append(",\"exit\":").append(r.exit).append(",\"laneStart\":").append(r.laneStart).append(",\"shafts\":").append(r.shafts.size())
+                  .append(",\"poly\":[");
+                for (int k = 0; k < r.poly.size(); k++) {
+                    BlockPos p = r.poly.get(k);
+                    if (k > 0) sb.append(',');
+                    sb.append('[').append(p.getX()).append(',').append(p.getY()).append(',').append(p.getZ()).append(']');
+                }
+                sb.append("]}");
+            }
+            sb.append("]}\n");
+            write(sb.toString(), true);
+        } catch (RuntimeException e) {
+            LOG.error("[Routerunner] failed to log the lane plan for {}; this room has no lane_plan record.", roomId, e);
+        }
+    }
+
+    /** A lane follow event: {@code done} / {@code off} / {@code advance} / {@code replan} / {@code finished}, with the pointer index. */
+    public static synchronized void laneEvent(long cellKeyRaw, String ev, int run, int runs, String reason, int aliveAhead, int prog) {
+        StringBuilder sb = head("lane", 200);
+        sb.append(",\"cellKey\":").append(quote(cellKey(cellKeyRaw)))
+          .append(",\"what\":").append(quote(ev))
+          .append(",\"run\":").append(run)
+          .append(",\"runs\":").append(runs)
+          .append(",\"reason\":").append(quote(reason))
+          .append(",\"aliveAhead\":").append(aliveAhead)
+          .append(",\"prog\":").append(prog)
+          .append("}\n");
+        write(sb.toString(), true);
+    }
+
     /** A tracked chest disappeared (world coords + the block id it was). */
     public static synchronized void breakEvent(BlockPos pos, String chestId) {
         StringBuilder sb = head("break", 160);
@@ -292,6 +350,8 @@ public final class RunLog {
               .append(",\"solveMs\":").append(sr.solveMs)
               .append(",\"geomMs\":").append(sr.geomMs)
               .append(",\"queueMs\":").append(sr.queueMs)
+              .append(",\"laneMs\":").append(sr.laneMs)
+              .append(",\"prefetchLeadMs\":").append(sr.prefetchLeadMs)
               .append(",\"exit\":[").append(sr.exitLocal.x()).append(',').append(sr.exitLocal.y()).append(',').append(sr.exitLocal.z()).append(']')
               .append(",\"chestList\":").append(localChestList(sr))
               .append(",\"otherChests\":").append(otherChestList(sr))
@@ -503,49 +563,6 @@ public final class RunLog {
                 .append(",\"dashSpec\":").append(quote(DashInfo.specId()))
                 .append(",\"weights\":").append(weightsJson == null || weightsJson.isEmpty() ? "{}" : weightsJson)
                 .append("}\n").toString(), true);
-    }
-
-    /**
-     * An adaptive-weight multiplier moved by more than 2 % (see {@link AdaptiveWeights}). Arrays are
-     * positional so the JSON stays the contract rather than the Java signature.
-     *
-     * @param profile  the movement profile these accumulators belong to
-     * @param rooms    rooms folded into the accumulators so far
-     * @param counts   {tight, narrow, mid, open, legs, sprint, drops} effective sample counts
-     * @param measured {vOpen, tight, narrow, mid, overheadS, overheadBlocks, sprint, dropW}; NaN → JSON null
-     * @param mult     {tight, narrow, mid, overhead, sprint, drop} effective multipliers actually applied
-     */
-    public static synchronized void adapt(String profile, int rooms, long[] counts, double[] measured, double[] mult) {
-        if (counts == null || counts.length < 7 || measured == null || measured.length < 8 || mult == null || mult.length < 6) {
-            LOG.error("[Routerunner] adapt record has the wrong array shape; skipping it (this adaptation is unlogged).");
-            return;
-        }
-        StringBuilder sb = head("adapt", 512);
-        sb.append(",\"profile\":").append(quote(profile))
-          .append(",\"rooms\":").append(rooms)
-          .append(",\"n\":{\"tight\":").append(counts[0])
-              .append(",\"narrow\":").append(counts[1])
-              .append(",\"mid\":").append(counts[2])
-              .append(",\"open\":").append(counts[3])
-              .append(",\"legs\":").append(counts[4])
-              .append(",\"sprint\":").append(counts[5])
-              .append(",\"drops\":").append(counts[6]).append('}')
-          .append(",\"measured\":{\"vOpen\":").append(orNull(measured[0]))
-              .append(",\"tight\":").append(orNull(measured[1]))
-              .append(",\"narrow\":").append(orNull(measured[2]))
-              .append(",\"mid\":").append(orNull(measured[3]))
-              .append(",\"overheadS\":").append(orNull(measured[4]))
-              .append(",\"overheadBlocks\":").append(orNull(measured[5]))
-              .append(",\"sprint\":").append(orNull(measured[6]))
-              .append(",\"dropW\":").append(orNull(measured[7])).append('}')
-          .append(",\"mult\":{\"tight\":").append(r4(mult[0]))
-              .append(",\"narrow\":").append(r4(mult[1]))
-              .append(",\"mid\":").append(r4(mult[2]))
-              .append(",\"overhead\":").append(r4(mult[3]))
-              .append(",\"sprint\":").append(r4(mult[4]))
-              .append(",\"drop\":").append(r4(mult[5])).append('}')
-          .append("}\n");
-        write(sb.toString(), true);
     }
 
     /** A measurement that isn't confident yet logs as JSON null, never as a number the tooling would trust. */

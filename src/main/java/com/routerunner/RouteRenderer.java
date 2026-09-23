@@ -24,7 +24,8 @@ import net.minecraftforge.fml.common.Mod;
 import java.util.List;
 
 /**
- * Draws the route in the world from the player through the next {@code cfg.lookahead} waypoints to the exit,
+ * Fallback overlay for a room whose lane plan failed: the waypoint route from the player through the next
+ * {@link #LOOKAHEAD} waypoints to the exit,
  * as depth-test-off quads. The current leg is red; later edges are coloured by mode (green walk, amber drop,
  * purple trident, cyan sprint, dim grey gap), and turnaround approaches are white (over red too). Waypoints get
  * a filled box and numbered label (current pink, next neon blue, further dark blue, exit orange); turnaround
@@ -32,6 +33,8 @@ import java.util.List;
  */
 @Mod.EventBusSubscriber(modid = Routerunner.MOD_ID, value = Dist.CLIENT)
 public final class RouteRenderer {
+    /** Waypoints drawn ahead of the cursor. */
+    private static final int LOOKAHEAD = 5;
     /** Half-width of the path ribbon (blocks). */
     private static final float RIBBON_HALF = 0.12f;
     /** Current-target label colour; shared with the HUD indicator. */
@@ -57,11 +60,12 @@ public final class RouteRenderer {
 
         RouteService.SolvedRoute sr = RouteService.current();
         if (sr == null) return;
+        if (sr.lane != null) return;
         RoutePlan plan = sr.plan;
         if (plan.path == null || plan.path.isEmpty() || plan.pathMode == null) return;
         int size = plan.waypoints.size();
         int cursor = sr.cursor;
-        int lookahead = Math.max(1, Math.min(12, cfg.lookahead));
+        int lookahead = LOOKAHEAD;
         boolean done = cursor >= size;
         P exit = sr.exitLocal;
         boolean exitShown = exit != null && (done || (size - cursor) <= lookahead);

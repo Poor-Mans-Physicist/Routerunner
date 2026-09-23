@@ -14,3 +14,5 @@
 !/libs/
 /libs/*
 !/libs/README.md
+!/native/
+/native/lane/target/

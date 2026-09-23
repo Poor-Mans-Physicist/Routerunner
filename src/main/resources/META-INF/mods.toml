@@ -11,8 +11,8 @@ displayName="Routerunner"
 authors="PoorMansPhysicist"
 description='''
 Routerunner — clientside chest-looting tools for Wold's Vaults.
-Live chests/min metrics + per-chest-type loot rates on a draggable HUD, plus a per-room waypoint
-solver that draws the route to follow and logs per-waypoint movement/clear times. Open the menu with
+Live chests/min metrics + per-chest-type loot rates on a draggable HUD, plus a per-room lane planner
+(Rust, bundled) that draws the route to follow on the floor and logs every vault. Open the menu with
 the [ key (rebindable in Controls).
 '''
 

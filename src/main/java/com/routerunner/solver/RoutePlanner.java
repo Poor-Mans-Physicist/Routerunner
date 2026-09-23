@@ -96,8 +96,6 @@ public final class RoutePlanner {
         public double speedAttr = 0.1;
         /** Angle (degrees) past which a route bend counts as a turnaround; display only. */
         public int turnaroundDeg = 120;
-        /** True when {@code AdaptiveWeights} scaled the weights in this snapshot (they differ from the raw sliders). */
-        public boolean adaptiveOn = false;
 
         /** Single-line JSON of every field, for the logs. */
         public String toJson() {

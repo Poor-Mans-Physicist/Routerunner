@@ -10,11 +10,11 @@ import net.minecraft.network.chat.TextComponent;
 
 import java.nio.file.Files;
 
-/** Top-level config menu (opened by the keybind): toggles, loot-tracking mode, HUD editor, routing, logs. */
+/** Top-level config menu (opened by the keybind): toggles on the left, HUD editor, history, laps, logs and help on the right. */
 public class RouterunnerConfigScreen extends Screen {
     private static final int STEP = 24;
-    private static final int LEFT_ROWS = 8;
-    private static final int RIGHT_ROWS = 7;
+    private static final int LEFT_ROWS = 5;
+    private static final int RIGHT_ROWS = 5;
 
     private final Screen parent;
     private int top;
@@ -52,28 +52,10 @@ public class RouterunnerConfigScreen extends Screen {
             b.setMessage(trackedLabel());
         }));
         y += step;
-        this.addRenderableWidget(new Button(lx, y, bw, 20, diffLabel(), b -> {
-            RouterunnerConfig cfg = RouterunnerConfig.get();
-            cfg.diffRoute = !cfg.diffRoute;
-            b.setMessage(diffLabel());
-        }));
-        y += step;
         this.addRenderableWidget(new Button(lx, y, bw, 20, hunterLabel(), b -> {
             RouterunnerConfig cfg = RouterunnerConfig.get();
             cfg.suppressHunter = !cfg.suppressHunter;
             b.setMessage(hunterLabel());
-        }));
-        y += step;
-        this.addRenderableWidget(new Button(lx, y, bw, 20, adaptiveLabel(), b -> {
-            RouterunnerConfig cfg = RouterunnerConfig.get();
-            cfg.adaptiveWeights = !cfg.adaptiveWeights;
-            b.setMessage(adaptiveLabel());
-        }));
-        y += step;
-        this.addRenderableWidget(new Button(lx, y, bw, 20, missedSkipLabel(), b -> {
-            RouterunnerConfig cfg = RouterunnerConfig.get();
-            cfg.missedSkip = !cfg.missedSkip;
-            b.setMessage(missedSkipLabel());
         }));
         y += step;
         this.addRenderableWidget(new Button(lx, y, bw, 20, arrowLabel(), b -> {
@@ -97,18 +79,8 @@ public class RouterunnerConfigScreen extends Screen {
         this.addRenderableWidget(new Button(rx, y, bw, 20, new TextComponent("Open Log Folder"),
                 b -> openLogFolder()));
         y += step;
-        this.addRenderableWidget(new Button(rx, y, bw, 20, new TextComponent("Adjust Weights"),
-                b -> this.minecraft.setScreen(new WeightsScreen(this))));
-        y += step;
         this.addRenderableWidget(new Button(rx, y, bw, 20, new TextComponent("Help"),
                 b -> this.minecraft.setScreen(new HelpScreen(this))));
-        y += step;
-        this.addRenderableWidget(new Button(rx, y, bw, 20, lookaheadLabel(), b -> {
-            RouterunnerConfig cfg = RouterunnerConfig.get();
-            cfg.lookahead = nextLookahead(cfg.lookahead);
-            RouterunnerConfig.save();
-            b.setMessage(lookaheadLabel());
-        }));
 
         this.addRenderableWidget(new Button(cx - 100, top + rows * step + 14, 200, 20,
                 new TextComponent("Done"), b -> this.onClose()));
@@ -136,44 +108,19 @@ public class RouterunnerConfigScreen extends Screen {
     }
 
     private Component routingLabel() {
-        return new TextComponent("Routing: " + (RouterunnerConfig.get().routingEnabled ? "Enabled" : "Disabled"));
+        return new TextComponent("Route overlay: " + (RouterunnerConfig.get().routingEnabled ? "Shown" : "Hidden"));
     }
 
     private Component trackedLabel() {
         return new TextComponent("Track loot: " + RouterunnerConfig.get().trackedChest.name());
     }
 
-    private Component diffLabel() {
-        return new TextComponent("Diff Route: " + (RouterunnerConfig.get().diffRoute ? "On" : "Off"));
-    }
-
     private Component hunterLabel() {
         return new TextComponent("Hunter boxes: " + (RouterunnerConfig.get().suppressHunter ? "Hidden" : "Shown"));
     }
 
-    private Component adaptiveLabel() {
-        return new TextComponent("Adaptive Weights: " + (RouterunnerConfig.get().adaptiveWeights ? "On" : "Off"));
-    }
-
-    private Component missedSkipLabel() {
-        return new TextComponent("Missed-waypoint skip: " + (RouterunnerConfig.get().missedSkip ? "On" : "Off"));
-    }
-
     private Component arrowLabel() {
         return new TextComponent("Target arrow: " + (RouterunnerConfig.get().offscreenIndicator ? "On" : "Off"));
-    }
-
-    private Component lookaheadLabel() {
-        return new TextComponent("Lookahead: " + RouterunnerConfig.get().lookahead);
-    }
-
-    /** Telegraph depth cycle (waypoints drawn ahead of the cursor); an off-list value snaps back to the first step. */
-    private static int nextLookahead(int cur) {
-        int[] steps = {3, 5, 8, 12};
-        for (int i = 0; i < steps.length; i++) {
-            if (steps[i] == cur) return steps[(i + 1) % steps.length];
-        }
-        return steps[0];
     }
 
     private static RouterunnerConfig.TrackedChest nextTracked(RouterunnerConfig.TrackedChest cur) {

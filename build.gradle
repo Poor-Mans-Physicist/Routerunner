@@ -4,7 +4,7 @@ plugins {
     id 'net.minecraftforge.gradle' version '5.1.+'
 }
 
-version = '0.17.0'
+version = '0.18.0'
 group = 'com.routerunner'
 archivesBaseName = 'Routerunner'
 
@@ -40,6 +40,11 @@ dependencies {
 }
 
 jar {
+    // The Rust lane planner (native/lane, `cargo build --release`) rides inside the jar and is unpacked at runtime.
+    from("native/lane/target/release") {
+        include 'routerunner_lane.dll'
+        into 'natives/windows-x64'
+    }
     manifest {
         attributes([
             'Specification-Title'   : 'routerunner',

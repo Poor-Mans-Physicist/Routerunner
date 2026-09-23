@@ -9,7 +9,7 @@ import net.minecraft.util.FormattedCharSequence;
 import java.util.ArrayList;
 import java.util.List;
 
-/** Scrollable player-facing help: the route overlay, the weights menu, laps and the run logs. */
+/** Scrollable player-facing help: the lane route, its colours and markers, how to run it, laps and the run logs. */
 public class HelpScreen extends Screen {
     private final Screen parent;
     private final List<FormattedCharSequence> lines = new ArrayList<>();
@@ -17,28 +17,31 @@ public class HelpScreen extends Screen {
     private int viewTop, viewBottom, textW, x0;
 
     private static final String[] PARAS = {
-        "§eRouterunner§r draws the fastest chest-looting route through a room. Follow the coloured line and break chests as you pass — you don't have to chase every single one.",
+        "§eRouterunner§r plans a route through each room as a chain of short runs and draws it on the floor. Follow the carpet, hold the mine button and keep moving — chain breaking takes the chests around you, so you don't aim at each one.",
         "",
-        "§eThe route line:§r",
-        "§a  Green§r — just walk it.",
-        "§b  Cyan§r — sprint-jump along it, looting as you go.",
-        "§6  Amber§r — a drop: walk off the edge and let yourself fall.",
-        "§d  Purple§r — trident dash (usually up or down).",
-        "§f  White§r — a turnaround is coming; you double back here.",
-        "§c  Red§r — the stretch you're on right now.",
+        "§eThe carpet and line:§r",
+        "§6  Orange§r — the next 14 blocks ahead of you. This is the part to follow.",
+        "§b  Cyan§r — the rest of the current run.",
+        "§7  Dim§r — the part you've already walked.",
+        "§7  Grey§r — the run after this one.",
+        "§a  Green line§r — the walk out to the exit once the room is done.",
+        "§d  Purple§r — a climb, drop or trident dash: the big floating purple arrow shows where the up or down move happens.",
+        "§c  Thin red line§r — you've strayed; it leads back to the route.",
         "",
-        "§eThe markers (numbered in look order):§r",
-        "§d  1 / Pink§r — the chest to break next.",
-        "§9  2 / Blue§r — the one after; line up your next look.",
-        "§1  Dark blue§r — further ahead.",
-        "§6  Orange§r — the exit.",
+        "§eThe chest boxes:§r",
+        "§d  Pink to red§r — every chest the current run will clear; the redder, the more falls with it. Hit the reddest first.",
+        "§a  Green wireframe§r — the next cluster on the run. Head for those; they stay marked until they fall.",
         "",
-        "§eRunning it:§r sweep across each cluster as you reach it. The route deliberately skips awkward, walled-in chests — breaking a neighbour chains them anyway — so don't backtrack for them. When the pink chest is gone, the route advances on its own.",
+        "§eRunning it:§r walk the orange carpet straight through the green cluster. When a run's chests are gone, or you pass its end, the route moves to the next run on its own. Run ends can sit behind you — the planner already priced the turn.",
         "",
-        "§eToo bouncy, or skipping too much?§r Open §eAdjust Weights§r and tune it live. Start with §fBail aggression§r (skim vs. loot-full) and §fBreak reach§r (how close you get before breaking).",
+        "§eWhen the room is done:§r the planner stops adding runs once the ones left would loot slower than about half your current rate, and the green line leads to the exit. Leaving early there is the right call, not a bug.",
         "",
-        "§eNew Lap§r resets the HUD counters only — the vault's own clocks and its log keep running underneath.",
-        "Every vault writes one §fvault_*.jsonl§r file into the runs folder (§eOpen Log Folder§r) holding the planned routes, your path, your chest breaks and the per-room diffs.",
+        "§eOff the route:§r wander more than 6 blocks from the whole run for 5 seconds and the room is replanned from where you stand. Dash warps are fine; the route picks you up where you land.",
+        "",
+        "§eNew Lap§r resets the HUD counters only — the vault's own clocks and its log keep running underneath. Use it to compare attempts in one vault.",
+        "Every vault writes one §fvault_*.jsonl§r file into the runs folder (§eOpen Log Folder§r) holding the planned routes, your path, your chest breaks and the per-room comparisons.",
+        "",
+        "§eSettings:§r the bail and exit weights live in §fconfig/routerunner/config.json§r (laneBail, laneExitWeight, laneBailRateFrac); the defaults are what the timings were tuned with.",
     };
 
     public HelpScreen(Screen parent) {

@@ -54,12 +54,12 @@ public class RouterunnerHud implements IIngameOverlay {
         }
     }
 
-    /** The bottom-left routing readout: follow state, last room's route accuracy and applied adaptive multipliers. */
+    /** The bottom-left routing readout: follow state and the last room's route accuracy. */
     private static String routeStatusLine() {
         StringBuilder sb = new StringBuilder(96).append("RR: ").append(RouteService.debugState());
         int acc = RouteService.lastAccuracyPct();
         if (acc >= 0) sb.append(" | Acc ").append(acc).append('%');
-        return sb.append(AdaptiveWeights.get().hudSuffix()).toString();
+        return sb.toString();
     }
 
     /**
@@ -69,12 +69,19 @@ public class RouterunnerHud implements IIngameOverlay {
     private static void renderOffscreenIndicator(PoseStack ps, Minecraft mc, Font font, int width, int height) {
         RouteService.SolvedRoute sr = RouteService.current();
         if (sr == null) return;
-        P target = sr.retargetPos;
-        if (target == null) {
-            if (sr.cursor >= sr.plan.waypoints.size()) return;
-            target = sr.plan.waypoints.get(sr.cursor).pos;
+        BlockPos w;
+        com.routerunner.lane.LaneRoute lr = sr.lane;
+        if (lr != null) {
+            w = lr.indicatorTarget();
+            if (w == null) return;
+        } else {
+            P target = sr.retargetPos;
+            if (target == null) {
+                if (sr.cursor >= sr.plan.waypoints.size()) return;
+                target = sr.plan.waypoints.get(sr.cursor).pos;
+            }
+            w = sr.worldOf(target);
         }
-        BlockPos w = sr.worldOf(target);
         Camera camera = mc.gameRenderer.getMainCamera();
         Vec3 c = camera.getPosition();
         double dx = w.getX() + 0.5 - c.x, dy = w.getY() + 0.5 - c.y, dz = w.getZ() + 0.5 - c.z;

@@ -60,7 +60,6 @@ public class ClientEvents {
             if (inVaultPrev) {
                 LookSampler.drainTo();
                 RouteService.reset();
-                AdaptiveWeights.get().save();
                 RunLog.pause("suspend");
                 RunLog.close();
                 suspend();
@@ -78,7 +77,6 @@ public class ClientEvents {
         } else if (!inVault && inVaultPrev) {
             LookSampler.drainTo();
             RouteService.reset();
-            AdaptiveWeights.get().save();
             finalizeVault();
             logVaultExit();
             logBreakSources();
