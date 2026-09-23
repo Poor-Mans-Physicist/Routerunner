@@ -47,7 +47,7 @@ public class RouterunnerConfig {
     public double laneExitWeight = 1.0;
     /** Rate-anchored bail: a lane must beat this fraction of the running realized chest rate (last 2 minutes,
      *  converted to model seconds with the live model-to-real ratio) or the plan ends and leads to the exit. */
-    public double laneBailRateFrac = 0.5;
+    public double laneBailRateFrac = 0.6;
     /** Plan lanes on the bundled Rust library when it loads; false forces the Java planner. */
     public boolean laneNative = true;
     /** Room-id substrings that disable routing in matching rooms. */
