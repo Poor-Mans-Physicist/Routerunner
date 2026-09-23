@@ -159,12 +159,13 @@ public class RouterunnerConfig {
         }
     }
 
-    /** The metric HUD elements, each independently placeable. */
+    /** The metric HUD elements, each independently placeable; DENSITY is the lap's average room density. */
     public enum HudElementId {
         TOTAL(true, 5, 5),
         NET_AVG(true, 5, 17),
         ACTIVE_AVG(true, 5, 29),
-        SLIDING(true, 5, 41);
+        SLIDING(true, 5, 41),
+        DENSITY(true, 5, 53);
 
         public final boolean defaultVisible;
         public final int defaultX;

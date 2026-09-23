@@ -65,6 +65,7 @@ public class HudEditorScreen extends Screen {
             case NET_AVG:    return "Net";
             case ACTIVE_AVG: return "Active";
             case SLIDING:    return "1m";
+            case DENSITY:    return "Density";
             default:         return id.name();
         }
     }

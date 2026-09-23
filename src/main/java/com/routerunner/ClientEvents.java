@@ -218,6 +218,7 @@ public class ClientEvents {
     private static void resetTrackers() {
         ChestScanner.reset();
         MetricsTracker.get().reset();
+        DensityTracker.reset();
         LootListener.get().reset();
         RouteService.reset();
         LookSampler.reset();
@@ -247,6 +248,7 @@ public class ClientEvents {
         if (!isInVault(mc.level)) return 0;
         MetricsTracker m = MetricsTracker.get();
         m.newLap();
+        DensityTracker.reset();
         LootListener.get().reset();
         RunLog.lap(m.getLap(), m.getTotal(), m.getActiveMs());
         logSpeed(mc.player);

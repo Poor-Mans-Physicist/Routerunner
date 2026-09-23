@@ -41,7 +41,7 @@ public class RouterunnerHud implements IIngameOverlay {
         for (RouterunnerConfig.HudElementId id : RouterunnerConfig.HudElementId.values()) {
             RouterunnerConfig.ElementConfig ec = cfg.element(id);
             if (!ec.visible) continue;
-            font.drawShadow(poseStack, textFor(id, m), ec.x, ec.y, 0xFFFFFF);
+            font.drawShadow(poseStack, textFor(id, m), ec.x, ec.y, colorFor(id, m));
         }
 
         if (cfg.lootPanelVisible && cfg.trackedChest != RouterunnerConfig.TrackedChest.ALL) {
@@ -153,12 +153,28 @@ public class RouterunnerHud implements IIngameOverlay {
     }
 
     /** HUD text for one metric element; counts are per lap. */
+    /** The 1-minute rate turns green or red when it runs more than this many chests/min above or below the lap's active average. */
+    private static final double TREND_BAND = 25.0;
+
+    /** Text colour for a readout: white, except the sliding rate, which shows the trend against the lap's active average. */
+    public static int colorFor(RouterunnerConfig.HudElementId id, MetricsTracker m) {
+        if (id != RouterunnerConfig.HudElementId.SLIDING) return 0xFFFFFF;
+        double d = m.getSlidingPerMin() - m.getLapActiveAvgPerMin();
+        if (d > TREND_BAND) return 0x55FF55;
+        if (d < -TREND_BAND) return 0xFF5555;
+        return 0xFFFFFF;
+    }
+
     public static String textFor(RouterunnerConfig.HudElementId id, MetricsTracker m) {
         switch (id) {
             case TOTAL:      return "Chests: " + m.getLapTotal();
             case NET_AVG:    return String.format("Net Avg: %.1f/min", m.getLapNetAvgPerMin());
             case ACTIVE_AVG: return String.format("Active Avg: %.1f/min", m.getLapActiveAvgPerMin());
             case SLIDING:    return String.format("1m: %.1f/min", m.getSlidingPerMin());
+            case DENSITY: {
+                double d = DensityTracker.average();
+                return d < 0 ? "Density: -" : String.format("Density: %.0f/room (%d)", d, DensityTracker.rooms());
+            }
             default:         return "";
         }
     }

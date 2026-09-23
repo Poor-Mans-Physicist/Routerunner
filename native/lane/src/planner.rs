@@ -88,7 +88,7 @@ impl Default for Params {
             ghost_noise: 0.0,
             seed: 0,
             max_lanes: 60,
-            trigger_s: 0.053,
+            trigger_s: 0.3,
         }
     }
 }

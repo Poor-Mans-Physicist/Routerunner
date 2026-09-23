@@ -70,7 +70,8 @@ public final class LanePlanner {
         public double ghostNoise = 0.0;
         public long seed = 0;
         public int maxLanes = 60;
-        public double triggerS = 0.053;
+        /** Seconds a chain trigger costs on top of the walking: fitted on 878 logged lane runs (2026-09-22). */
+        public double triggerS = 0.3;
     }
 
     /** One chain firing: where the ghost stood, which chest it hit, what fell. */

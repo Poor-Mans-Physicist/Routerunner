@@ -4,7 +4,9 @@ A client-side Forge mod for [Wold's Vaults](https://www.curseforge.com/minecraft
 that helps you loot more chests per minute in vaults.
 
 - **Live metrics HUD.** Total chests broken, average chests/min (overall and with pauses excluded), a sliding 1 minute
-  average, and per-chest-type loot rates. Can also hide Hunter boxes.
+  average that turns green or red when it runs more than 25 chests/min above or below the lap's active average, the
+  lap's average room density (target chests per room, read at each room's first scan), and per-chest-type loot rates.
+  Can also hide Hunter boxes.
 - **Lane route.** A planner solves each room as you enter it and draws the route on the floor: a chain of short runs
   through the densest chests, a heat map over the chests each run will clear, green markers on the next cluster, purple
   arrows wherever the route climbs, drops or dashes, and a green walk out when the room stops being worth it. The planner

@@ -98,7 +98,7 @@ public final class RouteService {
         static final long WINDOW_MS = 120_000;
         static final int MIN_BREAKS = 50;
         static final long MIN_SPAN_MS = 20_000;
-        static final double PRIOR_RATIO = 1.8, PRIOR_W = 5.0;
+        static final double PRIOR_RATIO = 1.1, PRIOR_W = 5.0;
         private static final java.util.ArrayDeque<Long> breaks = new java.util.ArrayDeque<>();
         private static double plannedS = 0, realizedS = 0;
 
@@ -113,7 +113,7 @@ public final class RouteService {
         }
 
         static synchronized double ratio() {
-            return Math.max(1.0, Math.min(4.0, (PRIOR_RATIO * PRIOR_W + realizedS) / (PRIOR_W + plannedS)));
+            return Math.max(0.7, Math.min(4.0, (PRIOR_RATIO * PRIOR_W + realizedS) / (PRIOR_W + plannedS)));
         }
 
         static synchronized double rate(long activeMs) {
@@ -208,11 +208,14 @@ public final class RouteService {
         int chosenRx = rx, chosenRz = rz;
         int[] counts = RoomGeometry.scanCounts(level, rx, rz);
         boolean playerInRoom = counts != null && total(counts) > 0;
+        if (counts != null) DensityTracker.onScan(DensityTracker.cellKey(rx, rz), counts[typeIndex(resolveTargetType(cfg, counts))]);
+        if (playerInRoom) DensityTracker.onEnter(DensityTracker.cellKey(rx, rz));
         updateBailMetrics(player, playerInRoom);
         if (counts == null || total(counts) == 0) {
             int[] ahead = aheadCell(player, rx, rz);
             if (ahead[0] != rx || ahead[1] != rz) {
                 int[] ac = RoomGeometry.scanCounts(level, ahead[0], ahead[1]);
+                if (ac != null) DensityTracker.onScan(DensityTracker.cellKey(ahead[0], ahead[1]), ac[typeIndex(resolveTargetType(cfg, ac))]);
                 if (ac != null && total(ac) > 0) {
                     chosenRx = ahead[0];
                     chosenRz = ahead[1];
@@ -324,6 +327,7 @@ public final class RouteService {
         String roomId = safeRoomId(ahead[0], ahead[1], player);
         if (roomId != null && isSkipped(cfg, roomId)) return;
         String targetType = resolveTargetType(cfg, ac);
+        DensityTracker.onScan(DensityTracker.cellKey(ahead[0], ahead[1]), ac[typeIndex(targetType)]);
         long geomStartNs = System.nanoTime();
         RoomGeometry.Snapshot snap = RoomGeometry.build(level, ahead[0], ahead[1], targetType, player.blockPosition());
         long geomMs = (System.nanoTime() - geomStartNs) / 1_000_000L;
@@ -813,6 +817,12 @@ public final class RouteService {
         return new BlockPos(sr.ox + local.x(), sr.oy + local.y(), sr.oz + local.z());
     }
 
+    /** Index of a chest type in {@link RoomGeometry#TYPES}, 0 when unknown. */
+    private static int typeIndex(String type) {
+        for (int i = 0; i < RoomGeometry.TYPES.length; i++) if (RoomGeometry.TYPES[i].equals(type)) return i;
+        return 0;
+    }
+
     private static String resolveTargetType(RouterunnerConfig cfg, int[] counts) {
         switch (cfg.trackedChest) {
             case GILDED: return "gilded";
@@ -853,6 +863,7 @@ public final class RouteService {
      */
     public static void onChestBroken(BlockPos pos) {
         RateCal.onBreak(MetricsTracker.get().getActiveMs());
+        if (pos != null) DensityTracker.onBreak(pos);
         SolvedRoute lsr = current;
         if (lsr != null && lsr.lane != null) lsr.lane.heatDirty = true;
         SolvedRoute sr = current;
