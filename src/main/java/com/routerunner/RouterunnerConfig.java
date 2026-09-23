@@ -58,6 +58,12 @@ public class RouterunnerConfig {
     /** Hide the_vault's Hunter chest outlines. */
     public boolean suppressHunter = false;
 
+    /** Learn this player's pace, per-burst cost and leg timing while they play (config/routerunner/adaptive/); off = the bundled model. */
+    public boolean adaptiveLearning = true;
+    /** Delete the oldest run logs once the runs folder is over {@link #runLogCapMB}. */
+    public boolean runLogCap = true;
+    public int runLogCapMB = 500;
+
     public static RouterunnerConfig get() {
         if (INSTANCE == null) {
             INSTANCE = new RouterunnerConfig();
@@ -126,6 +132,12 @@ public class RouterunnerConfig {
             double was = laneBailRateFrac;
             laneBailRateFrac = laneBailRateFrac < 0.0 ? 0.0 : 1.0;
             LOGGER.error("[Routerunner] laneBailRateFrac {} is outside [0,1]; clamped to {}.", was, laneBailRateFrac);
+            changed = true;
+        }
+        if (runLogCapMB < 50) {
+            int was = runLogCapMB;
+            runLogCapMB = 50;
+            LOGGER.error("[Routerunner] runLogCapMB {} is below 50; clamped to 50.", was);
             changed = true;
         }
         if (changed) save();

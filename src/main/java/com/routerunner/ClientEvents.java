@@ -60,6 +60,7 @@ public class ClientEvents {
             if (inVaultPrev) {
                 LookSampler.drainTo();
                 RouteService.reset();
+                com.routerunner.adaptive.Adaptive.onVaultExit();
                 RunLog.pause("suspend");
                 RunLog.close();
                 suspend();
@@ -77,6 +78,8 @@ public class ClientEvents {
         } else if (!inVault && inVaultPrev) {
             LookSampler.drainTo();
             RouteService.reset();
+            VaultGate.onVaultExit();
+            com.routerunner.adaptive.Adaptive.onVaultExit();
             finalizeVault();
             logVaultExit();
             logBreakSources();
@@ -95,6 +98,7 @@ public class ClientEvents {
                 vaultIdResolvedMs = System.currentTimeMillis();
                 List<String> resumed = RunPersistence.tryLoad(vid);
                 if (resumed != null) lastModifiers = resumed;
+                VaultGate.onVaultId(vid);
                 boolean resumedLog = RunLog.open(vid);
                 if (resumedLog) {
                     RunLog.resume("reconnect");
@@ -102,6 +106,7 @@ public class ClientEvents {
                 } else {
                     RunLog.vaultEnter(vid, MetricsTracker.get().getLap());
                 }
+                com.routerunner.adaptive.Adaptive.onVaultEnter();
                 logSpeed(player);
             }
         }
@@ -219,6 +224,7 @@ public class ClientEvents {
         ChestScanner.reset();
         MetricsTracker.get().reset();
         DensityTracker.reset();
+        VaultGate.reset();
         LootListener.get().reset();
         RouteService.reset();
         LookSampler.reset();

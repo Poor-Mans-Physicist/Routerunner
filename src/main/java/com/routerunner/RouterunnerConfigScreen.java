@@ -13,8 +13,8 @@ import java.nio.file.Files;
 /** Top-level config menu (opened by the keybind): toggles on the left, HUD editor, history, laps, logs and help on the right. */
 public class RouterunnerConfigScreen extends Screen {
     private static final int STEP = 24;
-    private static final int LEFT_ROWS = 5;
-    private static final int RIGHT_ROWS = 5;
+    private static final int LEFT_ROWS = 6;
+    private static final int RIGHT_ROWS = 6;
 
     private final Screen parent;
     private int top;
@@ -63,6 +63,13 @@ public class RouterunnerConfigScreen extends Screen {
             cfg.offscreenIndicator = !cfg.offscreenIndicator;
             b.setMessage(arrowLabel());
         }));
+        y += step;
+        this.addRenderableWidget(new Button(lx, y, bw, 20, adaptiveLabel(), b -> {
+            RouterunnerConfig cfg = RouterunnerConfig.get();
+            cfg.adaptiveLearning = !cfg.adaptiveLearning;
+            b.setMessage(adaptiveLabel());
+        }, (b, pose, mx, my) -> this.renderTooltip(pose, new TextComponent(
+                com.routerunner.adaptive.Adaptive.statusLine() + " (" + com.routerunner.adaptive.Adaptive.detailLine() + ")"), mx, my)));
 
         y = top;
         this.addRenderableWidget(new Button(rx, y, bw, 20, new TextComponent("Edit HUD Layout"),
@@ -81,6 +88,17 @@ public class RouterunnerConfigScreen extends Screen {
         y += step;
         this.addRenderableWidget(new Button(rx, y, bw, 20, new TextComponent("Help"),
                 b -> this.minecraft.setScreen(new HelpScreen(this))));
+        y += step;
+        this.addRenderableWidget(new Button(rx, y, bw, 20, new TextComponent("Reset Adaptive Model"), b -> {
+            if (!resetArmed) {
+                resetArmed = true;
+                b.setMessage(new TextComponent("Click again to reset"));
+                return;
+            }
+            resetArmed = false;
+            com.routerunner.adaptive.Adaptive.resetLearned();
+            b.setMessage(new TextComponent("Adaptive model reset ✓"));
+        }));
 
         this.addRenderableWidget(new Button(cx - 100, top + rows * step + 14, 200, 20,
                 new TextComponent("Done"), b -> this.onClose()));
@@ -117,6 +135,12 @@ public class RouterunnerConfigScreen extends Screen {
 
     private Component hunterLabel() {
         return new TextComponent("Hunter boxes: " + (RouterunnerConfig.get().suppressHunter ? "Hidden" : "Shown"));
+    }
+
+    private boolean resetArmed = false;
+
+    private Component adaptiveLabel() {
+        return new TextComponent("Adaptive learning: " + (RouterunnerConfig.get().adaptiveLearning ? "On" : "Off"));
     }
 
     private Component arrowLabel() {

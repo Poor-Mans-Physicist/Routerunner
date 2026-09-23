@@ -250,6 +250,8 @@ pub fn plan_json(plan: &Plan) -> J {
                 ("endBurst", J::I(e.end_burst as i64)),
                 ("align", J::D(e.align)),
                 ("tStart", J::D(e.t_start)),
+                ("nTrig", J::I((e.triggers.len() + e.trans_triggers.len()) as i64)),
+                ("tPen", J::D(e.t_pen)),
             ])
         })
         .collect();

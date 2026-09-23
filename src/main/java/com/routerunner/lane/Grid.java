@@ -500,6 +500,11 @@ public final class Grid {
         return null;
     }
 
+    /** Grounded A* with no sweep discount, the path a logged leg is priced on; null when there is none. */
+    public static List<P> groundPath(SolidGrid g, P a, P b) {
+        return astar(g, a, b, null);
+    }
+
     /** Horizontal path length in blocks. */
     static double walkLength(List<P> path) {
         double L = 0;

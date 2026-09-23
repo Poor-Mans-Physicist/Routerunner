@@ -85,6 +85,12 @@ public final class LaneRoute {
         public boolean exit;
         public int yield;
         public double seconds;
+        /** Chain triggers this run is planned to fire (a share of its lanes' count when a sharp turn split it). */
+        public double nTrig;
+        /** Planned travel seconds: {@link #seconds} minus the trigger charge and the fixed turn/flight penalties. */
+        public double travelS;
+        /** Fixed penalty seconds (turnaround, reversal, flight) inside {@link #seconds}. */
+        public double penaltyS;
     }
 
     public final LanePlanner planner;
@@ -144,12 +150,16 @@ public final class LaneRoute {
             List<P> polyLocal = new ArrayList<>();
             int yield = 0;
             double seconds = 0.0;
+            int nTrig = 0;
+            double pen = 0.0;
             int laneStart = 0;
             boolean first = true;
             for (int k : ks) {
                 LanePlanner.Lane e = plan.lanes.get(k);
                 yield += e.yield;
                 seconds += e.tTrans + e.tLane;
+                nTrig += e.nTrig;
+                pen += e.tPen;
                 appendDedup(polyLocal, e.trans);
                 if (first) {
                     laneStart = Math.max(0, polyLocal.size() - 1);
@@ -157,17 +167,17 @@ public final class LaneRoute {
                 }
                 if (e.cells.size() > 1) appendDedup(polyLocal, e.cells);
             }
-            addRun(polyLocal, laneStart, yield, seconds, false);
+            addRun(polyLocal, laneStart, yield, seconds, nTrig, pen, false);
         }
         if (plan.exitPath != null && !plan.exitPath.isEmpty()) {
             List<P> polyLocal = new ArrayList<>();
             appendDedup(polyLocal, plan.exitPath);
-            addRun(polyLocal, Math.max(0, polyLocal.size() - 1), 0, plan.tExit, true);
+            addRun(polyLocal, Math.max(0, polyLocal.size() - 1), 0, plan.tExit, plan.exitTriggers.size(), 0.0, true);
         }
     }
 
     /** Split a polyline at sharp turns into display runs, each with its share of the yield and time. */
-    private void addRun(List<P> polyLocal, int laneStart, int yield, double seconds, boolean exit) {
+    private void addRun(List<P> polyLocal, int laneStart, int yield, double seconds, int nTrig, double pen, boolean exit) {
         List<List<P>> parts = splitSharp(polyLocal);
         int total = Math.max(1, polyLocal.size());
         int offset = 0;
@@ -178,6 +188,9 @@ public final class LaneRoute {
             double frac = parts.size() == 1 ? 1.0 : (double) part.size() / total;
             r.yield = (int) Math.round(yield * frac);
             r.seconds = seconds * frac;
+            r.nTrig = nTrig * frac;
+            r.penaltyS = pen * frac;
+            r.travelS = Math.max(0.0, r.seconds - r.penaltyS - planner.P.triggerS * r.nTrig);
             int ls = laneStart - offset;
             r.laneStart = ls < 0 ? 0 : Math.min(ls, part.size() - 1);
             finish(r);
@@ -604,13 +617,6 @@ public final class LaneRoute {
             double rank = n == 1 ? 1.0 : (double) groupStart / (n - 1);
             out.put(r.brush.get(live.get(order[pos])), (float) Math.sqrt(rank * score[order[pos]]));
         }
-        return out;
-    }
-
-    /** Room-local chests still standing, for a replan from the live set. */
-    public List<P> aliveLocal(Predicate<BlockPos> alive) {
-        List<P> out = new ArrayList<>();
-        for (P c : planner.chests) if (alive.test(world(c))) out.add(c);
         return out;
     }
 

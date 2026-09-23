@@ -34,7 +34,7 @@ public class HelpScreen extends Screen {
         "",
         "§eRunning it:§r walk the orange carpet straight through the green cluster. When a run's chests are gone, or you pass its end, the route moves to the next run on its own. Run ends can sit behind you — the planner already priced the turn.",
         "",
-        "§eWhen the room is done:§r the planner stops adding runs once the ones left would loot slower than about half your current rate, and the green line leads to the exit. Leaving early there is the right call, not a bug.",
+        "§eWhen the room is done:§r the planner stops adding runs once the ones left would loot slower than about 60 % of your current rate, and the green line leads to the exit. Leaving early there is the right call, not a bug.",
         "",
         "§eOff the route:§r wander more than 6 blocks from the whole run for 5 seconds and the room is replanned from where you stand. Dash warps are fine; the route picks you up where you land.",
         "",
@@ -42,6 +42,10 @@ public class HelpScreen extends Screen {
         "Every vault writes one §fvault_*.jsonl§r file into the runs folder (§eOpen Log Folder§r) holding the planned routes, your path, your chest breaks and the per-room comparisons.",
         "",
         "§eSettings:§r the bail and exit weights live in §fconfig/routerunner/config.json§r (laneBail, laneExitWeight, laneBailRateFrac); the defaults are what the timings were tuned with.",
+        "",
+        "§eAdaptive learning§r (config menu): the planner starts from timings fitted on the author's runs and adjusts them to you as you play — your pace, your seconds per chain burst, and how long each kind of leg takes you. Saved in §fconfig/routerunner/adaptive/§r; §eReset Adaptive Model§r forgets it. Off plans with the bundled timings and learns nothing.",
+        "",
+        "§eSparse vaults§r (first three rooms under 150 target chests on average) get no run log and teach nothing. Once the runs folder passes 500 MB the oldest logs are deleted (§frunLogCap§r in config.json turns that off).",
     };
 
     public HelpScreen(Screen parent) {

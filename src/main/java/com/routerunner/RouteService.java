@@ -123,8 +123,23 @@ public final class RouteService {
             return breaks.size() / (span / 1000.0);
         }
 
+        /** Tracked breaks at or after {@code sinceMs} inside the rate window. */
+        static synchronized int breaksSince(long sinceMs) {
+            int n = 0;
+            for (java.util.Iterator<Long> it = breaks.descendingIterator(); it.hasNext(); ) {
+                if (it.next() < sinceMs) break;
+                n++;
+            }
+            return n;
+        }
+
+        /**
+         * The bail floor in model chests per second. With the adaptive model on, the model is already calibrated to
+         * this player's real seconds, so the realized rate needs no conversion; off, the live ratio converts it.
+         */
         static synchronized double bailFloor(RouterunnerConfig cfg, long activeMs) {
-            return Math.max(0.0, cfg.laneBailRateFrac) * rate(activeMs) * ratio();
+            double conv = com.routerunner.adaptive.Adaptive.enabled() ? 1.0 : ratio();
+            return Math.max(0.0, cfg.laneBailRateFrac) * rate(activeMs) * conv;
         }
 
         static synchronized void reset() {
@@ -151,6 +166,9 @@ public final class RouteService {
         if (sr == null) return;
         sr.tpSinceWp++;
         sr.tpSinceCapture = true;
+        synchronized (sr.teleportMs) {
+            sr.teleportMs.add(MetricsTracker.get().getActiveMs());
+        }
     }
     public static String debugState() { return lastState; }
 
@@ -172,6 +190,7 @@ public final class RouteService {
     public static void reset() {
         if (measuredRoom != null) {
             finalizeRoomForDiff(measuredRoom);
+            learnRoom(measuredRoom);
         }
         lastAccuracyPct = -1;
         current = null;
@@ -208,14 +227,23 @@ public final class RouteService {
         int chosenRx = rx, chosenRz = rz;
         int[] counts = RoomGeometry.scanCounts(level, rx, rz);
         boolean playerInRoom = counts != null && total(counts) > 0;
-        if (counts != null) DensityTracker.onScan(DensityTracker.cellKey(rx, rz), counts[typeIndex(resolveTargetType(cfg, counts))]);
-        if (playerInRoom) DensityTracker.onEnter(DensityTracker.cellKey(rx, rz));
+        if (counts != null) {
+            DensityTracker.onScan(DensityTracker.cellKey(rx, rz), counts[typeIndex(resolveTargetType(cfg, counts))]);
+            VaultGate.onScan(DensityTracker.cellKey(rx, rz), counts);
+        }
+        if (playerInRoom) {
+            DensityTracker.onEnter(DensityTracker.cellKey(rx, rz));
+            VaultGate.onEnter(DensityTracker.cellKey(rx, rz));
+        }
         updateBailMetrics(player, playerInRoom);
         if (counts == null || total(counts) == 0) {
             int[] ahead = aheadCell(player, rx, rz);
             if (ahead[0] != rx || ahead[1] != rz) {
                 int[] ac = RoomGeometry.scanCounts(level, ahead[0], ahead[1]);
-                if (ac != null) DensityTracker.onScan(DensityTracker.cellKey(ahead[0], ahead[1]), ac[typeIndex(resolveTargetType(cfg, ac))]);
+                if (ac != null) {
+                    DensityTracker.onScan(DensityTracker.cellKey(ahead[0], ahead[1]), ac[typeIndex(resolveTargetType(cfg, ac))]);
+                    VaultGate.onScan(DensityTracker.cellKey(ahead[0], ahead[1]), ac);
+                }
                 if (ac != null && total(ac) > 0) {
                     chosenRx = ahead[0];
                     chosenRz = ahead[1];
@@ -328,6 +356,7 @@ public final class RouteService {
         if (roomId != null && isSkipped(cfg, roomId)) return;
         String targetType = resolveTargetType(cfg, ac);
         DensityTracker.onScan(DensityTracker.cellKey(ahead[0], ahead[1]), ac[typeIndex(targetType)]);
+        VaultGate.onScan(DensityTracker.cellKey(ahead[0], ahead[1]), ac);
         long geomStartNs = System.nanoTime();
         RoomGeometry.Snapshot snap = RoomGeometry.build(level, ahead[0], ahead[1], targetType, player.blockPosition());
         long geomMs = (System.nanoTime() - geomStartNs) / 1_000_000L;
@@ -656,6 +685,8 @@ public final class RouteService {
             lp.opportunityFloor = opportunityFloor;
             lp.exitWeight = cfg.laneExitWeight;
             lp.bailFloor = RateCal.bailFloor(cfg, MetricsTracker.get().getActiveMs());
+            lp.triggerS = com.routerunner.adaptive.Adaptive.triggerS();
+            lp.pace = com.routerunner.adaptive.Adaptive.pace();
             lp.useNative = cfg.laneNative;
             if (cfg.laneNative) {
                 com.routerunner.lane.NativeLane.init(net.minecraftforge.fml.loading.FMLPaths.CONFIGDIR.get().resolve("routerunner").resolve("natives"));
@@ -666,8 +697,7 @@ public final class RouteService {
                     else LOG.warn("[Routerunner] native lane planner unavailable ({}); planning lanes in Java.", st);
                 }
             }
-            com.routerunner.lane.LegTimeModel model = com.routerunner.lane.LegTimeModel.forGame(
-                    net.minecraftforge.fml.loading.FMLPaths.CONFIGDIR.get().resolve("routerunner").resolve("legmodel.json"));
+            com.routerunner.lane.LegTimeModel model = com.routerunner.adaptive.Adaptive.planningModel();
             com.routerunner.lane.LanePlanner planner = new com.routerunner.lane.LanePlanner(
                     sr.grid, chestsLocal, sr.params.chainRange, sr.params.chainLimit, lp, model);
             P start = com.routerunner.lane.Grid.snapInside(sr.grid, startLocal == null ? sr.exitLocal : startLocal);
@@ -757,6 +787,8 @@ public final class RouteService {
             if (lr.engaged && r != null && !r.exit) {
                 double realized = (now - lr.runStartMs) / 1000.0;
                 if (realized > 0.5 && r.seconds > 0.05) RateCal.observe(r.seconds, realized);
+                com.routerunner.adaptive.Adaptive.onRunDone(r.travelS, lr.planner.P.pace, r.nTrig, r.penaltyS, realized,
+                        RateCal.breaksSince(lr.runStartMs));
             }
             lr.advance(player, now);
             com.routerunner.lane.LaneRoute.Run nx = lr.current();
@@ -902,7 +934,8 @@ public final class RouteService {
         if (crt != null && crt.cellKey != measuredCellKey) {
             if (measuredRoom != null) {
                 finalizeRoomForBail(measuredRoom);
-                    finalizeRoomForDiff(measuredRoom);
+                finalizeRoomForDiff(measuredRoom);
+                learnRoom(measuredRoom);
             }
             crt.hallwayIn = pendingHallwayBlocks;
             pendingHallwayBlocks = 0;
@@ -949,6 +982,23 @@ public final class RouteService {
         }
         int gone = countGone(level, sr);
         if (gone > sr.userChests) sr.userChests = gone;
+    }
+
+    /** Hand the room the player just left to the adaptive leg model (private copies; it learns on its own thread). */
+    private static void learnRoom(SolvedRoute room) {
+        try {
+            if (room.grid == null || room.userBreaks.size() < 2 || room.userTrail.size() < 2) return;
+            java.util.List<P> chests = new java.util.ArrayList<>(room.targetsWorld.size());
+            for (BlockPos b : room.targetsWorld) chests.add(new P(b.getX() - room.ox, b.getY() - room.oy, b.getZ() - room.oz));
+            java.util.List<Long> tps;
+            synchronized (room.teleportMs) {
+                tps = new java.util.ArrayList<>(room.teleportMs);
+            }
+            com.routerunner.adaptive.Adaptive.onRoomExit(room.cellKey, room.grid, chests, new java.util.ArrayList<>(room.userTrail),
+                    new java.util.ArrayList<>(room.userBreaks), tps);
+        } catch (Throwable t) {
+            LOG.error("[Routerunner] could not hand {} to the adaptive leg model; its legs are not learned.", room.roomId, t);
+        }
     }
 
     /** Score the player's trail against the solver's ground route and log one diff record for the room. */
@@ -1247,6 +1297,8 @@ public final class RouteService {
         final java.util.List<double[]> userTrail = new java.util.ArrayList<>();
         /** Target chests of this room the player broke: {activeMs, lx, ly, lz}. */
         final java.util.List<double[]> userBreaks = new java.util.ArrayList<>();
+        /** Active-clock times of teleports while this room was current (guarded by itself). */
+        final java.util.List<Long> teleportMs = new java.util.ArrayList<>();
         /** Lazily built set over {@link #targetsWorld}. */
         java.util.Set<BlockPos> targetSet = null;
         /** Max chests gone from this room while the player was in it. */

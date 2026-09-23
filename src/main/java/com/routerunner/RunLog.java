@@ -42,7 +42,7 @@ import java.util.stream.Stream;
 public final class RunLog {
     private static final Logger LOG = LogUtils.getLogger();
     /** Run-log format version, stamped on vault_enter. */
-    public static final int LOG_VERSION = 18;
+    public static final int LOG_VERSION = 19;
     private static final SimpleDateFormat FILE_FMT = new SimpleDateFormat("yyyyMMdd_HHmmss");
     /** Maximum events buffered before the vault id resolves. */
     private static final int BUFFER_CAP = 3000;
@@ -54,6 +54,8 @@ public final class RunLog {
     private static final Deque<String> pending = new ArrayDeque<>();
     private static int posSinceFlush = 0;
     private static boolean overflowLogged = false;
+    /** The density gate turned this vault's logging off: every record is dropped and nothing is opened. */
+    private static boolean suppressed = false;
 
     private RunLog() {}
 
@@ -68,6 +70,10 @@ public final class RunLog {
      * @return true if an existing file for this vault was resumed (a reconnect), false if a new one was created
      */
     public static synchronized boolean open(String vaultId) {
+        if (suppressed) {
+            pending.clear();
+            return false;
+        }
         try {
             Path dir = runsDir();
             Files.createDirectories(dir);
@@ -81,6 +87,7 @@ public final class RunLog {
                     StandardOpenOption.CREATE, StandardOpenOption.APPEND);
             currentFile = file;
             drainPending();
+            if (!resumed) pruneToCap(file);
             return resumed;
         } catch (IOException | RuntimeException e) {
             LOG.error("[Routerunner] failed to open the run log for vault {}; this vault will not be logged.", vaultId, e);
@@ -90,17 +97,82 @@ public final class RunLog {
         }
     }
 
-    /** Flush and close the current file (kept events stay buffered for whatever opens next). */
+    /** Flush and close the current file (kept events stay buffered for whatever opens next), then enforce the size cap. */
     public static synchronized void close() {
+        Path just = currentFile;
         closeWriter();
+        pruneToCap(just);
     }
 
-    /** Full teardown on vault entry: close any open file and drop anything still buffered. */
+    /** Full teardown on vault entry: close any open file, drop anything still buffered, and log again. */
     public static synchronized void reset() {
         closeWriter();
         pending.clear();
         posSinceFlush = 0;
         overflowLogged = false;
+        suppressed = false;
+    }
+
+    /**
+     * The density gate rejected this vault: close and delete its file, drop anything buffered, and write nothing
+     * more until the next vault.
+     */
+    public static synchronized void discardVault(String why) {
+        Path file = currentFile;
+        closeWriter();
+        pending.clear();
+        suppressed = true;
+        if (file == null) {
+            LOG.info("[Routerunner] run log off for this vault ({}); nothing had been written.", why);
+            return;
+        }
+        try {
+            Files.deleteIfExists(file);
+            LOG.info("[Routerunner] run log off for this vault ({}); deleted {}.", why, file.getFileName());
+        } catch (IOException | RuntimeException e) {
+            LOG.error("[Routerunner] could not delete the run log {} after the density gate rejected the vault; it stays on disk.", file, e);
+        }
+    }
+
+    /**
+     * Delete the oldest run logs until the folder is under the configured cap (config {@code runLogCap} on,
+     * {@code runLogCapMB}). {@code keep} (the file just opened or just closed) is never deleted. Every deletion is logged.
+     */
+    private static void pruneToCap(Path keep) {
+        RouterunnerConfig cfg = RouterunnerConfig.get();
+        if (!cfg.runLogCap) return;
+        long cap = (long) cfg.runLogCapMB * 1024L * 1024L;
+        Path dir = runsDir();
+        if (!Files.isDirectory(dir)) return;
+        try (Stream<Path> files = Files.list(dir)) {
+            List<Path> logs = files.filter(p -> {
+                String n = p.getFileName().toString();
+                return n.startsWith("vault_") && n.endsWith(".jsonl");
+            }).sorted(Comparator.comparing(p -> p.getFileName().toString())).collect(java.util.stream.Collectors.toList());
+            long total = 0;
+            long[] size = new long[logs.size()];
+            for (int i = 0; i < logs.size(); i++) {
+                size[i] = Files.size(logs.get(i));
+                total += size[i];
+            }
+            if (total <= cap) return;
+            long before = total;
+            int deleted = 0;
+            for (int i = 0; i < logs.size() && total > cap; i++) {
+                Path p = logs.get(i);
+                if (p.equals(keep) || p.equals(currentFile)) continue;
+                Files.deleteIfExists(p);
+                total -= size[i];
+                deleted++;
+                LOG.info("[Routerunner] run-log cap: deleted the oldest log {} ({} MB).", p.getFileName(),
+                        String.format(Locale.ROOT, "%.1f", size[i] / 1048576.0));
+            }
+            LOG.warn("[Routerunner] run logs were {} MB, over the {} MB cap; deleted {} oldest file(s), now {} MB. Set runLogCap to false in config.json to keep every log.",
+                    String.format(Locale.ROOT, "%.0f", before / 1048576.0), cfg.runLogCapMB, deleted,
+                    String.format(Locale.ROOT, "%.0f", total / 1048576.0));
+        } catch (IOException | RuntimeException e) {
+            LOG.error("[Routerunner] run-log cap check failed in {}; no logs were deleted.", dir, e);
+        }
     }
 
     /** Version of the reference solver's built-in weights, stamped on vault_enter for the analysis tools. */
@@ -117,6 +189,7 @@ public final class RunLog {
           .append(",\"weightsVersion\":").append(REFERENCE_WEIGHTS_VERSION)
           .append(",\"dashSpec\":").append(quote(DashInfo.specId()))
           .append(",\"weights\":").append(weightsJson())
+          .append(",\"adaptive\":").append(cfg.adaptiveLearning)
           .append(",\"lap\":").append(lap)
           .append("}\n");
         write(sb.toString(), true);
@@ -290,12 +363,15 @@ public final class RunLog {
               .append(",\"bailFloor\":").append(r2(lr.planner.P.bailFloor))
               .append(",\"modelS\":").append(r2(lr.plan.tTotal))
               .append(",\"yield\":").append(lr.plan.yieldTotal)
+              .append(",\"pace\":").append(r4(lr.planner.P.pace))
+              .append(",\"triggerS\":").append(r4(lr.planner.P.triggerS))
               .append(",\"runList\":[");
             for (int i = 0; i < lr.runs.size(); i++) {
                 com.routerunner.lane.LaneRoute.Run r = lr.runs.get(i);
                 if (i > 0) sb.append(',');
                 sb.append("{\"yield\":").append(r.yield).append(",\"s\":").append(r2(r.seconds)).append(",\"brush\":").append(r.brush.size())
                   .append(",\"exit\":").append(r.exit).append(",\"laneStart\":").append(r.laneStart).append(",\"shafts\":").append(r.shafts.size())
+                  .append(",\"nTrig\":").append(r2(r.nTrig)).append(",\"tTravel\":").append(r2(r.travelS)).append(",\"tPen\":").append(r2(r.penaltyS))
                   .append(",\"poly\":[");
                 for (int k = 0; k < r.poly.size(); k++) {
                     BlockPos p = r.poly.get(k);
@@ -565,6 +641,35 @@ public final class RunLog {
                 .append("}\n").toString(), true);
     }
 
+    /** The density gate passed this vault: the average target density over the first rooms and how many rooms it used. */
+    public static synchronized void densityGate(double density, int rooms, double threshold) {
+        write(head("density_gate", 128).append(",\"density\":").append(r1(density)).append(",\"rooms\":").append(rooms)
+                .append(",\"threshold\":").append(r1(threshold)).append(",\"pass\":true}\n").toString(), true);
+    }
+
+    /** Tier 0 of the adaptive model moved (or a vault started): pace a, seconds per burst b, runs learned. */
+    public static synchronized void calib(String reason, double a, double b, long n, long rejected) {
+        write(head("calib", 160).append(",\"reason\":").append(quote(reason)).append(",\"a\":").append(r4(a))
+                .append(",\"b\":").append(r4(b)).append(",\"n\":").append(n).append(",\"rejected\":").append(rejected)
+                .append("}\n").toString(), true);
+    }
+
+    /** Tier 1 of the adaptive model learned a room's legs: counts, both models' recent R2, the applied coefficients. */
+    public static synchronized void adaptModel(long cellKeyRaw, int rows, int pathFails, long n, double r2Bundled, double r2Adapted,
+                                               double interceptShift, boolean fellBack, double[] applied) {
+        StringBuilder sb = head("adapt_model", 400);
+        sb.append(",\"cellKey\":").append(quote(cellKey(cellKeyRaw)))
+          .append(",\"rows\":").append(rows).append(",\"pathFails\":").append(pathFails).append(",\"n\":").append(n)
+          .append(",\"r2Bundled\":").append(orNull(r2Bundled)).append(",\"r2Adapted\":").append(orNull(r2Adapted))
+          .append(",\"interceptShift\":").append(r4(interceptShift)).append(",\"fellBack\":").append(fellBack)
+          .append(",\"theta\":[");
+        for (int i = 0; i < applied.length; i++) {
+            if (i > 0) sb.append(',');
+            sb.append(r4(applied[i]));
+        }
+        write(sb.append("]}\n").toString(), true);
+    }
+
     /** A measurement that isn't confident yet logs as JSON null, never as a number the tooling would trust. */
     private static String orNull(double v) {
         return Double.isNaN(v) || Double.isInfinite(v) ? "null" : r4(v);
@@ -619,6 +724,7 @@ public final class RunLog {
     }
 
     private static void write(String line, boolean flush) {
+        if (suppressed) return;
         if (writer == null) {
             if (pending.size() >= BUFFER_CAP) {
                 pending.pollFirst();

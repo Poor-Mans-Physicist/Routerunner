@@ -17,13 +17,35 @@ public final class LegTimeModel {
     public final double[] coef;
     public final double intercept;
     public final double sigma;
+    /** Between-vault standard deviation of each coefficient (zeros when the JSON has none): the adaptive clamp width. */
+    public final double[] spread;
 
-    private LegTimeModel(double[] mean, double[] scale, double[] coef, double intercept, double sigma) {
+    private LegTimeModel(double[] mean, double[] scale, double[] coef, double intercept, double sigma,
+                         double[] spread) {
         this.mean = mean;
         this.scale = scale;
         this.coef = coef;
         this.intercept = intercept;
         this.sigma = sigma;
+        this.spread = spread == null || spread.length != 12 ? new double[12] : spread;
+    }
+
+    /** The same standardisation with other coefficients (an adapted fit), or a pace factor folded into the intercept. */
+    public LegTimeModel with(double[] newCoef, double newIntercept) {
+        return new LegTimeModel(mean, scale, newCoef.clone(), newIntercept, sigma, spread);
+    }
+
+    /** Every leg time multiplied by {@code pace}. */
+    public LegTimeModel scaled(double pace) {
+        return with(coef, intercept + Math.log(pace));
+    }
+
+    /** A short fingerprint of the standardisation and coefficients, so saved adaptive state can tell its prior changed. */
+    public String fingerprint() {
+        StringBuilder sb = new StringBuilder();
+        for (double[] a : new double[][]{mean, scale, coef}) for (double v : a) sb.append(String.format(java.util.Locale.ROOT, "%.6f,", v));
+        sb.append(String.format(java.util.Locale.ROOT, "%.6f", intercept));
+        return Integer.toHexString(sb.toString().hashCode());
     }
 
     private static volatile LegTimeModel bundled;
@@ -50,7 +72,7 @@ public final class LegTimeModel {
                 java.util.Objects.requireNonNull(LegTimeModel.class.getResourceAsStream("/assets/routerunner/legmodel_ridge.json"),
                         "bundled legmodel_ridge.json missing"), java.nio.charset.StandardCharsets.UTF_8)) {
             Raw raw = new Gson().fromJson(r, Raw.class);
-            m = new LegTimeModel(raw.mean, raw.scale, raw.coef, raw.intercept, raw.sigma);
+            m = new LegTimeModel(raw.mean, raw.scale, raw.coef, raw.intercept, raw.sigma, raw.spread);
         } catch (Exception e) {
             throw new IllegalStateException("bundled leg-time model unreadable", e);
         }
@@ -65,19 +87,39 @@ public final class LegTimeModel {
             if (raw == null || raw.coef == null || raw.coef.length != 12 || raw.mean.length != 12 || raw.scale.length != 12) {
                 throw new java.io.IOException("legmodel json at " + json + " does not hold 12 coefficients");
             }
-            return new LegTimeModel(raw.mean, raw.scale, raw.coef, raw.intercept, raw.sigma);
+            return new LegTimeModel(raw.mean, raw.scale, raw.coef, raw.intercept, raw.sigma, raw.spread);
         }
     }
 
     /** Seconds for one leg from raw (untransformed) features. */
     public double seconds(double straight, double ratio, double climb, double drop, double clrMin, double clrMean,
                           double tightFrac, double turnDeg, double densLine, double densDst, double prevBurst, double warp) {
-        double[] f = {
-                Math.log(Math.max(straight, 0.5)), Math.log(Math.max(ratio, 1.0)), climb, drop, clrMin, clrMean,
-                tightFrac, turnDeg / 90.0, densLine, Math.log1p(densDst), Math.log1p(prevBurst), warp};
+        double[] f = features(straight, ratio, climb, drop, clrMin, clrMean, tightFrac, turnDeg, densLine, densDst, prevBurst, warp);
         double s = intercept;
         for (int i = 0; i < 12; i++) s += coef[i] * (f[i] - mean[i]) / scale[i];
         return Math.exp(s);
+    }
+
+    /** The twelve transformed features, in the model's order. */
+    public static double[] features(double straight, double ratio, double climb, double drop, double clrMin, double clrMean,
+                                    double tightFrac, double turnDeg, double densLine, double densDst, double prevBurst, double warp) {
+        return new double[]{
+                Math.log(Math.max(straight, 0.5)), Math.log(Math.max(ratio, 1.0)), climb, drop, clrMin, clrMean,
+                tightFrac, turnDeg / 90.0, densLine, Math.log1p(densDst), Math.log1p(prevBurst), warp};
+    }
+
+    /** Transformed features to the model's standardised coordinates. */
+    public double[] standardize(double[] f) {
+        double[] z = new double[12];
+        for (int i = 0; i < 12; i++) z[i] = (f[i] - mean[i]) / scale[i];
+        return z;
+    }
+
+    /** Predicted log(seconds) at standardised features z. */
+    public double logSeconds(double[] z) {
+        double s = intercept;
+        for (int i = 0; i < 12; i++) s += coef[i] * z[i];
+        return s;
     }
 
     private static final class Raw {
@@ -86,5 +128,6 @@ public final class LegTimeModel {
         double[] coef;
         double intercept;
         double sigma;
+        double[] spread;
     }
 }

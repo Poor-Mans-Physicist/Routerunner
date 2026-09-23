@@ -68,5 +68,21 @@
   "v13",
   "v18"
  ],
- "note": "ridge on log(seconds); x = (f - mean)/scale; log_t = coef.x + intercept; features per tools/lanes.py LegTimeModel.vec; turn = momentum heading 0.4 s before the leg vs the leg"
+ "note": "ridge on log(seconds); x = (f - mean)/scale; log_t = coef.x + intercept; features per tools/lanes.py LegTimeModel.vec; turn = momentum heading 0.4 s before the leg vs the leg",
+ "spread": [
+  0.027945875866569426,
+  0.019276462690513835,
+  0.05848481506008655,
+  0.019330808657330945,
+  0.019230839576290532,
+  0.05344320237262389,
+  0.011896081676704215,
+  0.02367070493568798,
+  0.022965661692855393,
+  0.04369771435855732,
+  0.029278897103644192,
+  0.06327938529379028
+ ],
+ "spread_intercept": 0.06841737842233214,
+ "spread_note": "std of each coefficient across per-vault ridge fits (vaults with >= 250 legs, same standardisation); the adaptive model's per-coefficient clamp width"
 }

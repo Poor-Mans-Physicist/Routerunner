@@ -121,6 +121,7 @@ pub struct Lane {
     pub end_burst: i32,
     pub t_start: f64,
     pub run: usize,
+    pub t_pen: f64,
 }
 
 #[derive(Default)]
@@ -1017,6 +1018,7 @@ fn evaluate(
         end_burst: pb,
         t_start: 0.0,
         run: 0,
+        t_pen: penalty,
     })
 }
 

@@ -10,7 +10,7 @@ import net.minecraftforge.fml.common.Mod;
 public class Routerunner {
     public static final String MOD_ID = "routerunner";
     /** Stamped on every run log's {@code vault_enter}; keep in step with mods.toml / build.gradle. */
-    public static final String MOD_VERSION = "0.18.0";
+    public static final String MOD_VERSION = "1.0.0";
 
     public Routerunner() {
         RouterunnerConfig.load();

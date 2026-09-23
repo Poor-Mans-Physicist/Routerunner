@@ -72,6 +72,8 @@ public final class LanePlanner {
         public int maxLanes = 60;
         /** Seconds a chain trigger costs on top of the walking: fitted on 878 logged lane runs (2026-09-22). */
         public double triggerS = 0.3;
+        /** Pace factor already folded into the leg model's intercept (record only; the native planner never reads it). */
+        public double pace = 1.0;
     }
 
     /** One chain firing: where the ghost stood, which chest it hit, what fell. */
@@ -99,6 +101,9 @@ public final class LanePlanner {
         public int endBurst;
         public double tStart;
         public int run;
+        /** Chain triggers fired on the transition and the lane, and the fixed penalty seconds inside tTrans. */
+        public int nTrig;
+        public double tPen;
     }
 
     /** The finished plan. Times are model seconds (unscaled); the ghost timeline applies timeScale. */
@@ -259,7 +264,8 @@ public final class LanePlanner {
     private static final class NativeLaneRec {
         List<int[]> trans, cells;
         int yield, yieldTrans, endBurst;
-        double tTrans, tLane, rate, rateX, dExit, align, tStart;
+        double tTrans, tLane, rate, rateX, dExit, align, tStart, tPen;
+        int nTrig;
         int[] end;
         double[] dir;
     }
@@ -305,6 +311,8 @@ public final class LanePlanner {
                 e.endBurst = r.endBurst;
                 e.align = r.align;
                 e.tStart = r.tStart;
+                e.nTrig = r.nTrig;
+                e.tPen = r.tPen;
                 e.triggers = new ArrayList<>();
                 e.transTriggers = new ArrayList<>();
                 plan.lanes.add(e);
@@ -755,6 +763,7 @@ public final class LanePlanner {
         e.dExit = P.exitWeight * (exitTime(end) - exitTime(pos));
         e.rateX = exitAwareRate(yTotal, e.tTrans + tLane, e.dExit);
         e.remaining = remaining; e.triggers = triggers; e.transTriggers = transTriggers;
+        e.nTrig = triggers.size() + transTriggers.size(); e.tPen = penalty;
         e.endHeading = cells.size() == 1 ? tail : d0; e.endBurst = pb; e.align = align;
         return e;
     }
