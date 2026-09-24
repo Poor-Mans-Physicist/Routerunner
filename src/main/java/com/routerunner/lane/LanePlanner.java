@@ -145,7 +145,7 @@ public final class LanePlanner {
     }
 
     public final Params P;
-    final SolidGrid grid;
+    public final SolidGrid grid;
     final List<P> chests;
     final ChainModel chain;
     final LegTimeModel model;
@@ -158,6 +158,11 @@ public final class LanePlanner {
     private long exitFieldKey = Long.MIN_VALUE;
     private P exitCell = null;
     private final Map<Long, List<Integer>> chestBuckets = new HashMap<>();
+
+    /** The chain (or, at range 1, vein) model this planner clears chests with. */
+    public ChainModel chainModel() {
+        return chain;
+    }
 
     public LanePlanner(SolidGrid grid, List<P> chests, int chainRange, int chainLimit, Params params, LegTimeModel model) {
         this.P = params;
@@ -376,9 +381,10 @@ public final class LanePlanner {
         double R = P.breakReach;
         List<double[]> out = new ArrayList<>();
         int bx = Math.floorDiv(cell.x(), 5), by = Math.floorDiv(cell.y(), 5), bz = Math.floorDiv(cell.z(), 5);
-        for (int dx = -1; dx <= 1; dx++) {
-            for (int dy = -1; dy <= 1; dy++) {
-                for (int dz = -1; dz <= 1; dz++) {
+        int br = reachBuckets(R);
+        for (int dx = -br; dx <= br; dx++) {
+            for (int dy = -br; dy <= br; dy++) {
+                for (int dz = -br; dz <= br; dz++) {
                     List<Integer> v = chestBuckets.get(bkey(bx + dx, by + dy, bz + dz));
                     if (v == null) continue;
                     for (int i : v) {
@@ -396,9 +402,38 @@ public final class LanePlanner {
         return r;
     }
 
+    /** Buckets (of 5 blocks) the reach scan spans each way: 1 up to a 5-block reach, more beyond it. */
+    static int reachBuckets(double reach) {
+        return Math.max(1, (int) Math.ceil(reach / 5.0));
+    }
+
+    /** Half-width of the point-mode candidate window around a chest: 4 up to a 4-block reach, the reach beyond it. */
+    static int candSpan(double reach) {
+        return Math.max(4, (int) Math.floor(reach));
+    }
+
     private int liveReach(P cell, boolean[] remaining) {
         int n = 0;
         for (int i : reach(cell)) if (remaining[i]) n++;
+        return n;
+    }
+
+    /** The candidate pre-filter's value of a cell: live chests in reach, or at range 1 the live components they belong to. */
+    private int liveReachPre(P cell, boolean[] remaining) {
+        if (!chain.hasComponents()) return liveReach(cell, remaining);
+        Set<Integer> seen = new HashSet<>();
+        int n = 0;
+        for (int i : reach(cell)) if (remaining[i] && seen.add(chain.preKey(i))) n += chain.preValue(i);
+        return n;
+    }
+
+    /** Live chests in reach of {@code cells} from index {@code from}, counted once each (once per component at range 1). */
+    private int liveSetValue(List<P> cells, int from, boolean[] remaining) {
+        Set<Integer> seen = new HashSet<>();
+        int n = 0;
+        for (int k = from; k < cells.size(); k++) {
+            for (int i : reach(cells.get(k))) if (remaining[i] && seen.add(chain.preKey(i))) n += chain.preValue(i);
+        }
         return n;
     }
 
@@ -551,14 +586,15 @@ public final class LanePlanner {
         double L = Grid.dist(pos, cell);
         int n = Math.max(1, (int) (L / 3.0));
         Set<Integer> seen = new HashSet<>();
+        int n2 = 0;
         for (int k = 1; k < n; k++) {
             double t = (double) k / n;
             P q = new P((int) Math.round(pos.x() + (cell.x() - pos.x()) * t), (int) Math.round(pos.y() + (cell.y() - pos.y()) * t),
                     (int) Math.round(pos.z() + (cell.z() - pos.z()) * t));
             if (!Grid.standable(grid, q)) continue;
-            for (int i : reach(q)) if (remaining[i]) seen.add(i);
+            for (int i : reach(q)) if (remaining[i] && seen.add(chain.preKey(i))) n2 += chain.preValue(i);
         }
-        return seen.size();
+        return n2;
     }
 
     private List<Cand> candidates(State st, boolean[] remaining) {
@@ -568,16 +604,17 @@ public final class LanePlanner {
             Map<Long, P> cells = new HashMap<>();
             Map<Long, Integer> lives = new HashMap<>();
             int[] dys = {-1, 0, 1, 2, -2, 3, -3};
+            int span = candSpan(P.breakReach);
             for (int i = 0; i < chests.size(); i++) {
                 if (!remaining[i]) continue;
                 P c = chests.get(i);
-                for (int dx = -4; dx <= 4; dx++) {
-                    for (int dz = -4; dz <= 4; dz++) {
+                for (int dx = -span; dx <= span; dx++) {
+                    for (int dz = -span; dz <= span; dz++) {
                         for (int dy : dys) {
                             P q = new P(c.x() + dx, c.y() + dy, c.z() + dz);
                             long k = ckey(q);
                             if (cells.containsKey(k) || !Grid.standable(grid, q)) continue;
-                            int live = liveReach(q, remaining);
+                            int live = liveReachPre(q, remaining);
                             if (live > 0) { cells.put(k, q); lives.put(k, live); }
                         }
                     }
@@ -595,11 +632,10 @@ public final class LanePlanner {
                     List<P> seq = new ArrayList<>(c.cells);
                     if (direction == 1) java.util.Collections.reverse(seq);
                     for (int entry = 0; entry < Math.max(1, seq.size() - P.minLaneLen + 1); entry += P.entrySpacing) {
-                        Set<Integer> live = new HashSet<>();
-                        for (int k = entry; k < seq.size(); k++) for (int i : reach(seq.get(k))) if (remaining[i]) live.add(i);
-                        if (live.isEmpty()) continue;
+                        int live = liveSetValue(seq, entry, remaining);
+                        if (live == 0) continue;
                         double d = Grid.dist(pos, seq.get(entry));
-                        scored.add(new Cand(seq, entry, live.size() / (1.0 + d / 15.0)));
+                        scored.add(new Cand(seq, entry, live / (1.0 + d / 15.0)));
                     }
                 }
             }
@@ -612,9 +648,7 @@ public final class LanePlanner {
         for (Cand cd : top) {
             P start = cd.seq.get(cd.entry);
             double d = Grid.dist(pos, start);
-            Set<Integer> live = new HashSet<>();
-            for (int k = cd.entry; k < cd.seq.size(); k++) for (int i : reach(cd.seq.get(k))) if (remaining[i]) live.add(i);
-            cd.score = (live.size() + transEstimate(pos, start, remaining)) / (1.0 + d / 15.0);
+            cd.score = (liveSetValue(cd.seq, cd.entry, remaining) + transEstimate(pos, start, remaining)) / (1.0 + d / 15.0);
         }
         List<Cand> rer = new ArrayList<>(top);
         rer.sort((u, v) -> Double.compare(v.score, u.score));

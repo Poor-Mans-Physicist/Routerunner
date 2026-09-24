@@ -121,6 +121,7 @@ public final class LaneCli {
                 if (r.params.containsKey("minLaneLen")) p.minLaneLen = r.params.get("minLaneLen").intValue();
                 if (r.params.containsKey("minLaneClr")) p.minLaneClr = r.params.get("minLaneClr").intValue();
                 if (r.params.containsKey("turnCap")) p.turnCap = r.params.get("turnCap");
+                if (r.params.containsKey("breakReach")) p.breakReach = r.params.get("breakReach");
             }
             LanePlanner planner = new LanePlanner(grid, chests, r.chainRange, r.chainLimit, p, model);
             LanePlanner.Plan plan = planner.plan(entrance, exit);

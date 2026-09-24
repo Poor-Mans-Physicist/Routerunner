@@ -342,6 +342,18 @@ impl Planner {
 
 // ---- reach: chests triggerable from a cell (within breakReach, head line of sight), nearest first ----
 
+/// Buckets (of 5 blocks) the reach scan spans each way: 1 up to a 5-block reach, more beyond it.
+#[inline]
+fn reach_buckets(reach: f64) -> i32 {
+    ((reach / 5.0).ceil() as i32).max(1)
+}
+
+/// Half-width of the point-mode candidate window around a chest: 4 up to a 4-block reach, the reach beyond it.
+#[inline]
+fn cand_span(reach: f64) -> i32 {
+    (reach.floor() as i32).max(4)
+}
+
 fn ensure_reach(r: &Room, rc: &mut ReachCache, cell: P) -> (u32, u32) {
     let g = &r.g;
     let k = g.idx(cell.x, cell.y, cell.z);
@@ -354,9 +366,10 @@ fn ensure_reach(r: &Room, rc: &mut ReachCache, cell: P) -> (u32, u32) {
     let bx = floor_div(cell.x, 5);
     let by = floor_div(cell.y, 5);
     let bz = floor_div(cell.z, 5);
-    for dx in -1..=1 {
-        for dy in -1..=1 {
-            for dz in -1..=1 {
+    let br = reach_buckets(rr);
+    for dx in -br..=br {
+        for dy in -br..=br {
+            for dz in -br..=br {
                 for &i in r.chest_buckets.at(bx + dx, by + dy, bz + dz) {
                     let c = r.chests[i as usize];
                     let d = dist(cell, c);
@@ -693,16 +706,42 @@ fn trans_estimate(r: &Room, c: &mut Cache, pos: P, cell: P, remaining: &[bool]) 
         let (o, ln) = ensure_reach(r, &mut c.rc, q);
         for j in o..o + ln {
             let i = c.rc.arena[j as usize] as usize;
-            if remaining[i] && c.chest_stamp[i] != gen {
-                c.chest_stamp[i] = gen;
-                count += 1;
+            if remaining[i] {
+                let (key, v) = r.chain.pre_key(i);
+                if c.chest_stamp[key] != gen {
+                    c.chest_stamp[key] = gen;
+                    count += v;
+                }
             }
         }
     }
     count
 }
 
-/// Live chests in reach of `cells`, counted once each.
+/// The candidate pre-filter's value of a cell: live chests in reach, or at range 1 the live
+/// components they belong to (see `ChainModel::pre_key`).
+fn live_reach_pre(r: &Room, c: &mut Cache, cell: P, remaining: &[bool]) -> i32 {
+    if r.chain.comp.is_empty() {
+        return live_reach(r, &mut c.rc, cell, remaining);
+    }
+    c.chest_gen = c.chest_gen.wrapping_add(1);
+    let gen = c.chest_gen;
+    let (o, l) = ensure_reach(r, &mut c.rc, cell);
+    let mut n = 0;
+    for k in o..o + l {
+        let i = c.rc.arena[k as usize] as usize;
+        if remaining[i] {
+            let (key, v) = r.chain.pre_key(i);
+            if c.chest_stamp[key] != gen {
+                c.chest_stamp[key] = gen;
+                n += v;
+            }
+        }
+    }
+    n
+}
+
+/// Live chests in reach of `cells`, counted once each (once per component at range 1).
 fn live_set_size(r: &Room, c: &mut Cache, cells: &[P], remaining: &[bool]) -> i32 {
     c.chest_gen = c.chest_gen.wrapping_add(1);
     let gen = c.chest_gen;
@@ -711,9 +750,12 @@ fn live_set_size(r: &Room, c: &mut Cache, cells: &[P], remaining: &[bool]) -> i3
         let (o, ln) = ensure_reach(r, &mut c.rc, cell);
         for j in o..o + ln {
             let i = c.rc.arena[j as usize] as usize;
-            if remaining[i] && c.chest_stamp[i] != gen {
-                c.chest_stamp[i] = gen;
-                count += 1;
+            if remaining[i] {
+                let (key, v) = r.chain.pre_key(i);
+                if c.chest_stamp[key] != gen {
+                    c.chest_stamp[key] = gen;
+                    count += v;
+                }
             }
         }
     }
@@ -728,6 +770,7 @@ fn candidates(r: &Room, c: &mut Cache, st: &State, remaining: &[bool]) -> Vec<Ca
         c.cand_gen = c.cand_gen.wrapping_add(1);
         let gen = c.cand_gen;
         let dys = [-1i32, 0, 1, 2, -2, 3, -3];
+        let span = cand_span(r.p.break_reach);
         let mut keys: Vec<i64> = Vec::new();
         let mut cellv: Vec<P> = Vec::new();
         let mut livev: Vec<i32> = Vec::new();
@@ -736,12 +779,12 @@ fn candidates(r: &Room, c: &mut Cache, st: &State, remaining: &[bool]) -> Vec<Ca
                 continue;
             }
             let ch = r.chests[i];
-            for dx in -4..=4 {
+            for dx in -span..=span {
                 let qx = ch.x + dx;
                 if qx < 0 || qx >= g.sx {
                     continue;
                 }
-                for dz in -4..=4 {
+                for dz in -span..=span {
                     let qz = ch.z + dz;
                     if qz < 0 || qz >= g.sz {
                         continue;
@@ -757,7 +800,7 @@ fn candidates(r: &Room, c: &mut Cache, st: &State, remaining: &[bool]) -> Vec<Ca
                             continue;
                         }
                         let q = P::new(qx, qy, qz);
-                        let live = live_reach(r, &mut c.rc, q, remaining);
+                        let live = live_reach_pre(r, c, q, remaining);
                         if live > 0 {
                             c.cand_stamp[k] = gen;
                             keys.push(ckey(q));

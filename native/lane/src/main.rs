@@ -143,6 +143,9 @@ fn plan_room(r: &RoomIn, model: &LegTimeModel) -> Result<J, String> {
             if let Some(v) = m.get("turnCap") {
                 p.turn_cap = *v;
             }
+            if let Some(v) = m.get("breakReach") {
+                p.break_reach = *v;
+            }
         }
         // The grid is cheap to rebuild and the planner owns it, matching the Java CLI's
         // one-planner-per-mode construction.

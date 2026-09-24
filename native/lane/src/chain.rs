@@ -1,6 +1,7 @@
 //! Port of `com.routerunner.solver.ChainModel`: breaking one chest clears up to `limit` chests,
 //! each within `range` (Chebyshev) of a cleared one, FIFO BFS, nearest-first by Manhattan distance
-//! with the neighbour-scan order as the tiebreak.
+//! with the neighbour-scan order as the tiebreak. At range 1 (Vein Miner) it also labels the
+//! static 26-connected components the candidate pre-filter scores by.
 
 use crate::grid::P;
 
@@ -102,6 +103,13 @@ pub struct ChainModel {
     pub bucket: i32,
     pts: Vec<P>,
     buckets: Buckets,
+    /// Range 1 only: component root (lowest chest index) per chest, and component size per root.
+    /// Empty for chain ranges. Exact for live chests while every trigger clears its whole live
+    /// component, i.e. while no component is larger than `limit`.
+    pub comp: Vec<u32>,
+    pub comp_size: Vec<u32>,
+    /// Largest component, 0 for chain ranges.
+    pub comp_max: u32,
 }
 
 /// Stamped scratch for `clear_from`'s membership set.
@@ -123,12 +131,65 @@ impl ChainModel {
         let range = range.max(0);
         let limit = limit.max(1) as usize;
         let bucket = (range + 1).max(1);
-        ChainModel {
+        let mut m = ChainModel {
             range,
             limit,
             bucket,
             pts: pts.to_vec(),
             buckets: Buckets::build(pts, bucket, false),
+            comp: Vec::new(),
+            comp_size: Vec::new(),
+            comp_max: 0,
+        };
+        if range <= 1 && limit > 1 {
+            m.label_components();
+        }
+        m
+    }
+
+    /// Flood-fill the chests into 26-connected components (the vein rule), rooted at their lowest index.
+    fn label_components(&mut self) {
+        let n = self.pts.len();
+        let all = vec![true; n];
+        let mut comp = vec![u32::MAX; n];
+        let mut size = vec![0u32; n];
+        let mut stack: Vec<u32> = Vec::new();
+        let mut nb: Vec<u32> = Vec::new();
+        let mut max = 0u32;
+        for s0 in 0..n {
+            if comp[s0] != u32::MAX {
+                continue;
+            }
+            comp[s0] = s0 as u32;
+            stack.push(s0 as u32);
+            let mut k = 0u32;
+            while let Some(h) = stack.pop() {
+                k += 1;
+                self.neighbors(h, &all, &mut nb);
+                for &j in nb.iter() {
+                    if comp[j as usize] == u32::MAX {
+                        comp[j as usize] = s0 as u32;
+                        stack.push(j);
+                    }
+                }
+            }
+            size[s0] = k;
+            max = max.max(k);
+        }
+        self.comp = comp;
+        self.comp_size = size;
+        self.comp_max = max;
+    }
+
+    /// Pre-filter stamp key and value of live chest `i`: the chest itself, or at range 1 its whole
+    /// component (capped at `limit`, what one trigger can take), counted once per component.
+    #[inline]
+    pub fn pre_key(&self, i: usize) -> (usize, i32) {
+        if self.comp.is_empty() {
+            (i, 1)
+        } else {
+            let c = self.comp[i] as usize;
+            (c, self.comp_size[c].min(self.limit as u32) as i32)
         }
     }
 

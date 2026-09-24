@@ -31,7 +31,10 @@ import java.util.Map;
  * large floating purple arrow through the space where the vertical move happens. When the player is off the lane a
  * thin red tracer leads from their feet to the pointer. The heatmap boxes every unbroken chest the current run can
  * reach (the next run's too, fainter), bright pink for the least valuable through hot red for the best, and the
- * chests inside the pointer window, the cluster being hit or hit next, get a bright green wireframe.
+ * chests inside the pointer window, the cluster being hit or hit next, get a bright green wireframe. Under Vein Miner,
+ * the chests of a big touching group that the run only sees a corner of get a thicker deep-blue wireframe instead
+ * (priority breaks, see {@link LaneRoute.Run#priority}). Where the next run heads back the way the current one came,
+ * a yellow U-turn arc, tail and arrowhead mark the turn at the junction, full strength once the player is close.
  */
 @Mod.EventBusSubscriber(modid = Routerunner.MOD_ID, value = Dist.CLIENT)
 public final class LaneRenderer {
@@ -48,6 +51,14 @@ public final class LaneRenderer {
     private static final float[] HEAT_HOT = {1.0f, 0.05f, 0.05f};
     private static final float[] TARGET_COL = {0.15f, 1.0f, 0.30f};
     private static final float TARGET_HALF = 0.035f;
+    private static final float[] PRIORITY_COL = {0.10f, 0.30f, 1.0f};
+    private static final float PRIORITY_HALF = 0.06f;
+    private static final float[] UTURN_COL = {1.0f, 0.92f, 0.20f};
+    private static final float UTURN_HALF = 0.16f;
+    private static final double UTURN_RADIUS = 2.0;
+    private static final double UTURN_TAIL = 3.0;
+    private static final int UTURN_STEPS = 12;
+    private static final double UTURN_NEAR = 12.0;
     private static final double TARGET_OUTSET = 0.03;
     private static final float CARPET_LIFT = 0.03f;
     private static final float LINE_LIFT = 0.55f;
@@ -114,6 +125,11 @@ public final class LaneRenderer {
         }
         progressLine(buf, mat, cur.poly, prog, base, hot);
         for (LaneRoute.Shaft s : cur.shafts) arrow(buf, mat, s, 0.85f, bob);
+        if (cur.uturn && cur.uturnIn != null && !cur.poly.isEmpty()) {
+            BlockPos j = cur.poly.get(cur.poly.size() - 1);
+            boolean near = Math.sqrt(j.distToCenterSqr(mc.player.getX(), mc.player.getY(), mc.player.getZ())) <= UTURN_NEAR;
+            uturn(buf, mat, j, cur.uturnIn, cur.uturnSide, near ? 0.95f : 0.45f);
+        }
         List<BlockPos> tracer = lr.tracer;
         if (lr.offLane && tracer != null && tracer.size() > 1) {
             plainLine(buf, mat, tracer, TRACER_COL, 0.9f, LINE_HALF_TRACER, false);
@@ -122,7 +138,9 @@ public final class LaneRenderer {
         Vec3 pp = mc.player.position();
         heatBoxes(buf, mat, lr.heatNext, pp, 0.45f);
         heatBoxes(buf, mat, lr.heat, pp, 1.0f);
-        for (BlockPos b : lr.targets) wire(buf, mat, b, TARGET_COL, 0.95f);
+        java.util.Set<BlockPos> prio = lr.priorityTargets;
+        for (BlockPos b : lr.targets) if (!prio.contains(b)) wire(buf, mat, b, TARGET_COL, 0.95f, TARGET_HALF);
+        for (BlockPos b : prio) wire(buf, mat, b, PRIORITY_COL, 1.0f, PRIORITY_HALF);
         tess.end();
 
         RenderSystem.depthMask(true);
@@ -150,17 +168,46 @@ public final class LaneRenderer {
     }
 
     /** A bright wireframe around a block: twelve thin bars, each drawn in two planes so it reads from any angle. */
-    private static void wire(BufferBuilder buf, Matrix4f mat, BlockPos b, float[] c, float a) {
+    private static void wire(BufferBuilder buf, Matrix4f mat, BlockPos b, float[] c, float a, float half) {
         double o = TARGET_OUTSET;
         double x0 = b.getX() - o, y0 = b.getY() - o, z0 = b.getZ() - o;
         double x1 = b.getX() + 1 + o, y1 = b.getY() + 1 + o, z1 = b.getZ() + 1 + o;
         double[] nx = {1, 0, 0}, ny = {0, 1, 0}, nz = {0, 0, 1};
         for (double y : new double[]{y0, y1}) {
-            for (double z : new double[]{z0, z1}) bar(buf, mat, x0, y, z, x1, y, z, ny, nz, TARGET_HALF, c, a);
+            for (double z : new double[]{z0, z1}) bar(buf, mat, x0, y, z, x1, y, z, ny, nz, half, c, a);
         }
         for (double x : new double[]{x0, x1}) {
-            for (double z : new double[]{z0, z1}) bar(buf, mat, x, y0, z, x, y1, z, nx, nz, TARGET_HALF, c, a);
-            for (double y : new double[]{y0, y1}) bar(buf, mat, x, y, z0, x, y, z1, nx, ny, TARGET_HALF, c, a);
+            for (double z : new double[]{z0, z1}) bar(buf, mat, x, y0, z, x, y1, z, nx, nz, half, c, a);
+            for (double y : new double[]{y0, y1}) bar(buf, mat, x, y, z0, x, y, z1, nx, ny, half, c, a);
+        }
+    }
+
+    /**
+     * The U-turn cue at a junction {@code j}: a half circle of {@link #UTURN_RADIUS} that leaves along the heading
+     * {@code in} and swings to {@code side} (+1 toward (-in.z, in.x)), then a {@link #UTURN_TAIL}-block tail back
+     * along -in and an arrowhead, at the centreline's height.
+     */
+    private static void uturn(BufferBuilder buf, Matrix4f mat, BlockPos j, double[] in, int side, float a) {
+        double ix = in[0], iz = in[1];
+        double px = -iz * side, pz = ix * side;
+        double y = j.getY() + LINE_LIFT + 0.02;
+        double jx = j.getX() + 0.5, jz = j.getZ() + 0.5;
+        double cx = jx + px * UTURN_RADIUS, cz = jz + pz * UTURN_RADIUS;
+        double lx = jx, lz = jz;
+        for (int k = 1; k <= UTURN_STEPS; k++) {
+            double t = Math.PI * k / UTURN_STEPS;
+            double x = cx + UTURN_RADIUS * (-px * Math.cos(t) + ix * Math.sin(t));
+            double z = cz + UTURN_RADIUS * (-pz * Math.cos(t) + iz * Math.sin(t));
+            ribbon(buf, mat, lx, y, lz, x, y, z, UTURN_HALF, UTURN_COL, a);
+            lx = x;
+            lz = z;
+        }
+        double ex = lx - ix * UTURN_TAIL, ez = lz - iz * UTURN_TAIL;
+        ribbon(buf, mat, lx, y, lz, ex, y, ez, UTURN_HALF, UTURN_COL, a);
+        double hx = -iz, hz = ix;
+        for (int sgn = -1; sgn <= 1; sgn += 2) {
+            ribbon(buf, mat, ex, y, ez, ex + ix * CHEVRON_LEN + hx * sgn * CHEVRON_HALF, y, ez + iz * CHEVRON_LEN + hz * sgn * CHEVRON_HALF,
+                    UTURN_HALF, UTURN_COL, a);
         }
     }
 

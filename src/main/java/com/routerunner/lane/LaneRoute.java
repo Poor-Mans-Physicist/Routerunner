@@ -43,8 +43,19 @@ public final class LaneRoute {
     public static final double STALE_FRAC = 0.25;
     /** Engaged on a run with no pointer progress and no brush chest broken for this long: the run is done. */
     public static final long STALL_MS = 2500;
+    /** Half-width of the floor carpet (blocks); fixed so a longer break reach doesn't widen the drawn lane. */
+    public static final double CARPET_REACH = 4.5;
     /** A smoothed heading change sharper than this splits a run into two display runs. */
     public static final double SPLIT_TURN_DEG = 100.0;
+    /** A junction whose next run heads back by at least this much is a U-turn and gets its floor cue. */
+    public static final double UTURN_DEG = 120.0;
+    /** Blocks of polyline each side of a junction used for the headings into and out of it. */
+    public static final double UTURN_HEADING_BLOCKS = 2.0;
+    /** A touching group needs at least this many chests (and 3x the prune threshold) to be a priority break. */
+    public static final int PRIORITY_MIN = 50;
+    public static final double PRIORITY_THRESHOLD_MULT = 3.0;
+    /** Vein heat: a touching group this size or bigger scores 1 (log scale below it). */
+    public static final double HEAT_VEIN_REF = 300.0;
 
     public static final int SEG_FLAT = 0;
     public static final int SEG_STEEP = 1;
@@ -91,6 +102,19 @@ public final class LaneRoute {
         public double travelS;
         /** Fixed penalty seconds (turnaround, reversal, flight) inside {@link #seconds}. */
         public double penaltyS;
+        /** The next run heads back the way this one came: a turn of at least {@link #UTURN_DEG} at their junction. */
+        public boolean uturn;
+        /** The side the U-turn swings to: +1 toward (-in.z, in.x), -1 away from it. */
+        public int uturnSide;
+        /** Unit horizontal heading {x, z} into the U-turn. */
+        public double[] uturnIn;
+        /**
+         * Vein Miner only: chests of touching groups that are big but show only a few chests to this run's reach
+         * (the break that fells hundreds from a corner that doesn't look like much). Drawn deep blue.
+         */
+        public final Set<BlockPos> priority = new HashSet<>();
+        /** Vein Miner only: component root -> this run's brush chests in that component. */
+        final Map<Integer, List<Integer>> groupVisible = new HashMap<>();
     }
 
     public final LanePlanner planner;
@@ -128,6 +152,15 @@ public final class LaneRoute {
      * moment the run becomes current, however far away the player still is.
      */
     public volatile Set<BlockPos> targets = Set.of();
+    /** The current run's live {@link Run#priority} chests. */
+    public volatile Set<BlockPos> priorityTargets = Set.of();
+    /**
+     * The first solve's pruning: groups under {@code pruneThreshold} chests (= {@code pruneLambda} chests/s x
+     * {@code pruneTHit} s per break) were left out of the plan; {@code prunedGroups} groups, {@code prunedChests}
+     * chests. Threshold 0 when the rate was not known yet.
+     */
+    public double pruneThreshold, pruneLambda, pruneTHit;
+    public int prunedGroups, prunedChests;
     /** Polyline index the target window is anchored at (the first live brush chest ahead of the pointer), -1 when none. */
     public volatile int targetAnchor = -1;
     /** Why the last {@link Event#DONE} fired: {@code end}, {@code swept}, {@code empty} or {@code stall}. */
@@ -174,6 +207,86 @@ public final class LaneRoute {
             appendDedup(polyLocal, plan.exitPath);
             addRun(polyLocal, Math.max(0, polyLocal.size() - 1), 0, plan.tExit, plan.exitTriggers.size(), 0.0, true);
         }
+        markUturns();
+        markPriority(PRIORITY_MIN);
+    }
+
+    /** Record the first solve's pruning (see {@link #pruneThreshold}) and re-mark priority breaks against it. */
+    public void setPrune(double threshold, double lambda, double tHit, int groups, int chests) {
+        pruneThreshold = threshold;
+        pruneLambda = lambda;
+        pruneTHit = tHit;
+        prunedGroups = groups;
+        prunedChests = chests;
+        markPriority(Math.max(PRIORITY_MIN, PRIORITY_THRESHOLD_MULT * threshold));
+    }
+
+    /** A replan keeps the room's planner, so it keeps the first solve's pruning too. */
+    public void copyPrune(LaneRoute old) {
+        setPrune(old.pruneThreshold, old.pruneLambda, old.pruneTHit, old.prunedGroups, old.prunedChests);
+    }
+
+    /**
+     * Mark each run's priority breaks: touching groups of at least {@code minSize} chests of which the run's reach
+     * sees no more than max(3, size / 20). Vein Miner only; a chain trigger never clears more than its limit.
+     */
+    private void markPriority(double minSize) {
+        for (Run r : runs) {
+            r.priority.clear();
+            for (List<Integer> vis : r.groupVisible.values()) {
+                int size = planner.chain.compSizeOf(vis.get(0));
+                if (size < minSize || vis.size() > Math.max(3, size / 20)) continue;
+                for (int i : vis) r.priority.add(world(planner.chests.get(i)));
+            }
+        }
+    }
+
+    /**
+     * Flag each run whose next run heads back: the heading over the last {@link #UTURN_HEADING_BLOCKS} of the run
+     * against the heading over the first of the next. The swing side follows the next run's lateral offset, then
+     * whichever side has floor to stand on.
+     */
+    private void markUturns() {
+        for (int k = 0; k + 1 < runs.size(); k++) {
+            Run a = runs.get(k), b = runs.get(k + 1);
+            double[] in = heading(a.polyLocal, true);
+            double[] out = heading(b.polyLocal, false);
+            if (in == null || out == null) continue;
+            double ang = Math.toDegrees(Math.acos(Math.max(-1.0, Math.min(1.0, in[0] * out[0] + in[1] * out[1]))));
+            if (ang < UTURN_DEG) continue;
+            double px = -in[1], pz = in[0];
+            double lateral = px * out[0] + pz * out[1];
+            if (Math.abs(lateral) < 0.2) {
+                P j = a.polyLocal.get(a.polyLocal.size() - 1);
+                P far = b.polyLocal.get(Math.min(b.polyLocal.size() - 1, 4));
+                lateral = px * (far.x() - j.x()) + pz * (far.z() - j.z());
+                if (Math.abs(lateral) < 0.5) {
+                    boolean plus = Grid.standable(planner.grid, new P(j.x() + (int) Math.round(2 * px), j.y(), j.z() + (int) Math.round(2 * pz)));
+                    boolean minus = Grid.standable(planner.grid, new P(j.x() - (int) Math.round(2 * px), j.y(), j.z() - (int) Math.round(2 * pz)));
+                    lateral = plus || !minus ? 1.0 : -1.0;
+                }
+            }
+            a.uturn = true;
+            a.uturnSide = lateral >= 0 ? 1 : -1;
+            a.uturnIn = in;
+        }
+    }
+
+    /**
+     * Unit horizontal heading of a polyline at its end ({@code atEnd}) or start, over the first stretch at least
+     * {@link #UTURN_HEADING_BLOCKS} long; null when the polyline never gets that far horizontally.
+     */
+    private static double[] heading(List<P> poly, boolean atEnd) {
+        if (poly.size() < 2) return null;
+        P anchor = atEnd ? poly.get(poly.size() - 1) : poly.get(0);
+        for (int k = 1; k < poly.size(); k++) {
+            P q = atEnd ? poly.get(poly.size() - 1 - k) : poly.get(k);
+            double dx = atEnd ? anchor.x() - q.x() : q.x() - anchor.x();
+            double dz = atEnd ? anchor.z() - q.z() : q.z() - anchor.z();
+            double len = Math.hypot(dx, dz);
+            if (len >= UTURN_HEADING_BLOCKS) return new double[]{dx / len, dz / len};
+        }
+        return null;
     }
 
     /** Split a polyline at sharp turns into display runs, each with its share of the yield and time. */
@@ -252,7 +365,7 @@ public final class LaneRoute {
     private void finish(Run r) {
         Set<Long> carpetKeys = new HashSet<>();
         Set<Integer> brushSet = new HashSet<>();
-        double R = planner.P.breakReach;
+        double R = Math.min(planner.P.breakReach, CARPET_REACH);
         int Ri = (int) R;
         for (int j = 0; j < r.polyLocal.size(); j++) {
             P c = r.polyLocal.get(j);
@@ -285,6 +398,7 @@ public final class LaneRoute {
             r.brush.add(world(c));
             r.brushIdx.add(i);
             r.brushNearest.add(best);
+            if (planner.chain.hasComponents()) r.groupVisible.computeIfAbsent(planner.chain.preKey(i), g -> new ArrayList<>()).add(i);
         }
         r.shafts.addAll(shafts(r.poly));
         runs.add(r);
@@ -462,6 +576,13 @@ public final class LaneRoute {
         }
         targets = tg;
         targetAnchor = anchor;
+        if (r.priority.isEmpty()) {
+            priorityTargets = Set.of();
+        } else {
+            Set<BlockPos> pt = new HashSet<>();
+            for (BlockPos b : r.priority) if (alive.test(b)) pt.add(b);
+            priorityTargets = pt;
+        }
         if (!r.exit && aliveNow < need) {
             lastDone = "empty";
             offSinceMs = -1;
@@ -516,6 +637,7 @@ public final class LaneRoute {
         lastAliveSeen = -1;
         runStartMs = nowMs;
         targets = Set.of();
+        priorityTargets = Set.of();
         targetAnchor = -1;
         tracer = null;
         tracerShafts = List.of();
@@ -602,11 +724,16 @@ public final class LaneRoute {
         double cap = Math.max(1, planner.chain.limit);
         double[] score = new double[n];
         Integer[] order = new Integer[n];
+        boolean vein = planner.chain.hasComponents();
         for (int j = 0; j < n; j++) {
             int i = r.brushIdx.get(live.get(j));
-            double chain = Math.min(cap, planner.chain.clearFrom(i, remaining).size()) / cap;
-            double dens = Math.min(1.0, planner.chain.neighbors(i, remaining).size() / HEAT_DENS_REF);
-            score[j] = 0.5 * chain + 0.5 * dens;
+            if (vein) {
+                score[j] = Math.min(1.0, Math.log1p(planner.chain.compSizeOf(i)) / Math.log1p(HEAT_VEIN_REF));
+            } else {
+                double chain = Math.min(cap, planner.chain.clearFrom(i, remaining).size()) / cap;
+                double dens = Math.min(1.0, planner.chain.neighbors(i, remaining).size() / HEAT_DENS_REF);
+                score[j] = 0.5 * chain + 0.5 * dens;
+            }
             order[j] = j;
         }
         java.util.Arrays.sort(order, (u, v) -> Double.compare(score[u], score[v]));

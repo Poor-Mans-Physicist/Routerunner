@@ -42,7 +42,7 @@ import java.util.stream.Stream;
 public final class RunLog {
     private static final Logger LOG = LogUtils.getLogger();
     /** Run-log format version, stamped on vault_enter. */
-    public static final int LOG_VERSION = 19;
+    public static final int LOG_VERSION = 21;
     private static final SimpleDateFormat FILE_FMT = new SimpleDateFormat("yyyyMMdd_HHmmss");
     /** Maximum events buffered before the vault id resolves. */
     private static final int BUFFER_CAP = 3000;
@@ -188,6 +188,7 @@ public final class RunLog {
           .append(",\"logVersion\":").append(LOG_VERSION)
           .append(",\"weightsVersion\":").append(REFERENCE_WEIGHTS_VERSION)
           .append(",\"dashSpec\":").append(quote(DashInfo.specId()))
+          .append(",\"mineSpec\":").append(quote(ChainMinerInfo.current().spec()))
           .append(",\"weights\":").append(weightsJson())
           .append(",\"adaptive\":").append(cfg.adaptiveLearning)
           .append(",\"lap\":").append(lap)
@@ -365,6 +366,15 @@ public final class RunLog {
               .append(",\"yield\":").append(lr.plan.yieldTotal)
               .append(",\"pace\":").append(r4(lr.planner.P.pace))
               .append(",\"triggerS\":").append(r4(lr.planner.P.triggerS))
+              .append(",\"miner\":{\"range\":").append(lr.planner.chainModel().range)
+                  .append(",\"limit\":").append(lr.planner.chainModel().limit)
+                  .append(",\"compMax\":").append(lr.planner.chainModel().compMax)
+                  .append(",\"reach\":").append(r2(lr.planner.P.breakReach)).append('}')
+              .append(",\"prune\":{\"threshold\":").append(r2(lr.pruneThreshold))
+                  .append(",\"lambda\":").append(r2(lr.pruneLambda))
+                  .append(",\"tHit\":").append(r4(lr.pruneTHit))
+                  .append(",\"groups\":").append(lr.prunedGroups)
+                  .append(",\"chests\":").append(lr.prunedChests).append('}')
               .append(",\"runList\":[");
             for (int i = 0; i < lr.runs.size(); i++) {
                 com.routerunner.lane.LaneRoute.Run r = lr.runs.get(i);
@@ -372,6 +382,7 @@ public final class RunLog {
                 sb.append("{\"yield\":").append(r.yield).append(",\"s\":").append(r2(r.seconds)).append(",\"brush\":").append(r.brush.size())
                   .append(",\"exit\":").append(r.exit).append(",\"laneStart\":").append(r.laneStart).append(",\"shafts\":").append(r.shafts.size())
                   .append(",\"nTrig\":").append(r2(r.nTrig)).append(",\"tTravel\":").append(r2(r.travelS)).append(",\"tPen\":").append(r2(r.penaltyS))
+                  .append(",\"uturn\":").append(r.uturn).append(",\"priority\":").append(r.priority.size())
                   .append(",\"poly\":[");
                 for (int k = 0; k < r.poly.size(); k++) {
                     BlockPos p = r.poly.get(k);
@@ -595,7 +606,8 @@ public final class RunLog {
               .append(",\"trail\":").append(trailArray(room))
               .append(",\"breakList\":").append(breakArray(room))
               .append(",\"weights\":").append(pm.toJson())
-              .append(",\"chain\":{\"range\":").append(pm.chainRange).append(",\"limit\":").append(pm.chainLimit).append('}')
+              .append(",\"chain\":{\"mode\":").append(quote(pm.miner)).append(",\"spec\":").append(quote(pm.minerSpec))
+                  .append(",\"tier\":").append(pm.minerTier).append(",\"range\":").append(pm.chainRange).append(",\"limit\":").append(pm.chainLimit).append('}')
               .append(",\"user\":{\"chests\":").append(userChests)
                   .append(",\"sec\":").append(r1(sec))
                   .append(",\"chestsPerMin\":").append(r1(userCpm))
@@ -611,8 +623,15 @@ public final class RunLog {
               .append(",\"follow\":{\"avgOff\":").append(r2(follow[0]))
                   .append(",\"maxOff\":").append(r2(follow[1]))
                   .append(",\"pctOver2\":").append(r1(follow[2])).append('}')
-              .append(",\"accuracy\":").append(accuracyObj(accuracy))
-              .append("}\n");
+              .append(",\"accuracy\":").append(accuracyObj(accuracy));
+            if (room.bigGroups != null) {
+                sb.append(",\"bigGroups\":{\"groups\":").append(room.bigGroups[0])
+                  .append(",\"hit\":").append(room.bigGroups[1])
+                  .append(",\"missed\":").append(room.bigGroups[2])
+                  .append(",\"missedChests\":").append(room.bigGroups[3])
+                  .append(",\"minSize\":").append(room.bigGroups[4]).append('}');
+            }
+            sb.append("}\n");
             write(sb.toString(), true);
         } catch (RuntimeException e) {
             LOG.error("[Routerunner] failed to log the room diff for {}; this room has no room_diff record.", room.roomId, e);
@@ -637,6 +656,7 @@ public final class RunLog {
     public static synchronized void weights(String weightsJson) {
         write(head("weights", 1024)
                 .append(",\"dashSpec\":").append(quote(DashInfo.specId()))
+                .append(",\"mineSpec\":").append(quote(ChainMinerInfo.current().spec()))
                 .append(",\"weights\":").append(weightsJson == null || weightsJson.isEmpty() ? "{}" : weightsJson)
                 .append("}\n").toString(), true);
     }
@@ -647,9 +667,30 @@ public final class RunLog {
                 .append(",\"threshold\":").append(r1(threshold)).append(",\"pass\":true}\n").toString(), true);
     }
 
+    /**
+     * The mining ability the planner routes with: on the first solve of a vault and whenever it changes. Range 1 is
+     * Vein Miner (touching chests only); {@code mode} {@code default} means the ability tree was unreadable and the
+     * planner fell back to a 6/32 chain. Also carries the block reach ({@code reach} = min of Forge's survival reach
+     * and the vault-capped attribute) and the break reach the lane planner uses ({@code planReach}).
+     */
+    public static synchronized void miner(ChainMinerInfo.Miner m, String reason, double[] reach, double planReach) {
+        write(head("miner", 240).append(",\"reason\":").append(quote(reason))
+                .append(",\"mode\":").append(quote(m.mode()))
+                .append(",\"spec\":").append(quote(m.spec()))
+                .append(",\"tier\":").append(m.tier())
+                .append(",\"range\":").append(m.range())
+                .append(",\"limit\":").append(m.limit())
+                .append(",\"reach\":").append(r2(reach[0]))
+                .append(",\"reachForge\":").append(r2(reach[1]))
+                .append(",\"reachAttr\":").append(r2(reach[2]))
+                .append(",\"planReach\":").append(r2(planReach))
+                .append("}\n").toString(), true);
+    }
+
     /** Tier 0 of the adaptive model moved (or a vault started): pace a, seconds per burst b, runs learned. */
-    public static synchronized void calib(String reason, double a, double b, long n, long rejected) {
-        write(head("calib", 160).append(",\"reason\":").append(quote(reason)).append(",\"a\":").append(r4(a))
+    public static synchronized void calib(String reason, String miner, double a, double b, long n, long rejected) {
+        write(head("calib", 180).append(",\"reason\":").append(quote(reason)).append(",\"miner\":").append(quote(miner))
+                .append(",\"a\":").append(r4(a))
                 .append(",\"b\":").append(r4(b)).append(",\"n\":").append(n).append(",\"rejected\":").append(rejected)
                 .append("}\n").toString(), true);
     }

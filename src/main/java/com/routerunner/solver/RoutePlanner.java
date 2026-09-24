@@ -89,9 +89,16 @@ public final class RoutePlanner {
         public double openSprintMinDist = 3.0;
         public int openSprintMinClear = 2;
         public int openSprintMaxRise = 3;
-        /** Equipped Chain Miner range/limit, read at solve time (see ChainMinerInfo). */
+        /** Equipped mining ability's range/limit, read at solve time (see ChainMinerInfo); range 1 is Vein Miner. */
         public int chainRange = 6;
         public int chainLimit = 32;
+        /** {@code chain}, {@code vein} or {@code default} (tree unreadable), the selected Vein Miner specialization id and its actual tier. */
+        public String miner = "default";
+        public String minerSpec = null;
+        public int minerTier = -1;
+        /** Game block reach (see PlayerReach) and the lane planner's break reach derived from it. */
+        public double reach = 5.0;
+        public double planReach = 4.5;
         /** Player MOVEMENT_SPEED attribute at solve time; logged only, no cost term reads it. */
         public double speedAttr = 0.1;
         /** Angle (degrees) past which a route bend counts as a turnaround; display only. */

@@ -50,6 +50,9 @@ public class RouterunnerConfig {
     public double laneBailRateFrac = 0.6;
     /** Plan lanes on the bundled Rust library when it loads; false forces the Java planner. */
     public boolean laneNative = true;
+    /** Leave out (and don't highlight) chest groups too small to repay a break: under the running realized rate times
+     *  the seconds one break costs. Needs the rate, so the first rooms of a vault are never pruned. */
+    public boolean lanePrune = true;
     /** Room-id substrings that disable routing in matching rooms. */
     public List<String> routingSkipList = new ArrayList<>(List.of("labyrinth"));
     /** Draw a screen-edge arrow toward the next target chests while they are off screen. */

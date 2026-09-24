@@ -201,6 +201,8 @@ public final class RouteService {
         setState("idle");
         sessionHotSpotSum = 0;
         roomsForHotSpot = 0;
+        lastMinerLabel = null;
+        veinLearnPauseLogged = false;
         pendingHallwayBlocks = 0;
         lastPlayerPos = null;
         measuredRoom = null;
@@ -288,12 +290,12 @@ public final class RouteService {
                     com.routerunner.lane.LaneRoute lr = cur.lane;
                     int nLaneRuns = lr.runs.size() - (lr.runs.get(lr.runs.size() - 1).exit ? 1 : 0);
                     suffix = lr.finished() ? "at exit" : (lr.current().exit ? "lane → exit" : ("lane " + (lr.cur + 1) + "/" + nLaneRuns));
-                    setState("route " + suffix + " [" + lr.mode + "]");
+                    setState("route " + suffix + " [" + lr.mode + veinTag(cur) + "]");
                 } else {
-                    setState("route " + suffix + " [" + cur.targetType + "]");
+                    setState("route " + suffix + " [" + cur.targetType + veinTag(cur) + "]");
                 }
             } else {
-                setState("diff tracking [" + cur.targetType + "]");
+                setState("diff tracking [" + cur.targetType + veinTag(cur) + "]");
             }
             return;
         }
@@ -332,7 +334,7 @@ public final class RouteService {
         }
         setState("solving…");
         solvingCell = cellKey;
-        submitSolve(snap, cellKey, roomId, targetType, cfg, buildParams(), fGeomMs, false);
+        submitSolve(snap, cellKey, roomId, targetType, cfg, buildParams(true), fGeomMs, false);
     }
 
     /**
@@ -362,7 +364,7 @@ public final class RouteService {
         long geomMs = (System.nanoTime() - geomStartNs) / 1_000_000L;
         if (snap == null || snap.targetsLocal.isEmpty()) return;
         prefetchingCell = key;
-        submitSolve(snap, key, roomId, targetType, cfg, buildParams(), geomMs, true);
+        submitSolve(snap, key, roomId, targetType, cfg, buildParams(true), geomMs, true);
     }
 
     /** Make a prefetched route current now that the player has entered its cell, and log it as solved. */
@@ -411,10 +413,10 @@ public final class RouteService {
                 } else {
                     current = sr;
                     RunLog.roomSolve(sr);
-                    LOG.info("[Routerunner] Solved {} ({} chests, {} waypoints, {}% planned, chain {}/{}, speed {}) in {} ms (geometry {} ms, queued {} ms).", roomId,
+                    LOG.info("[Routerunner] Solved {} ({} chests, {} waypoints, {}% planned, {} {}/{}, speed {}) in {} ms (geometry {} ms, queued {} ms).", roomId,
                             snap.targetsLocal.size(), plan.waypoints.size(),
                             snap.targetsLocal.isEmpty() ? 0 : (100 * plan.collected / snap.targetsLocal.size()),
-                            params.chainRange, params.chainLimit, String.format(Locale.ROOT, "%.3f", params.speedAttr),
+                            params.miner, params.chainRange, params.chainLimit, String.format(Locale.ROOT, "%.3f", params.speedAttr),
                             sr.solveMs, sr.geomMs, sr.queueMs);
                 }
             } catch (Throwable t) {
@@ -681,12 +683,14 @@ public final class RouteService {
             if (chestsLocal == null || chestsLocal.isEmpty() || sr.grid == null) return null;
             com.routerunner.lane.LanePlanner.Params lp = new com.routerunner.lane.LanePlanner.Params();
             lp.pointMode = true;
+            lp.breakReach = sr.params.planReach;
             lp.bailAggression = cfg.laneBail;
             lp.opportunityFloor = opportunityFloor;
             lp.exitWeight = cfg.laneExitWeight;
             lp.bailFloor = RateCal.bailFloor(cfg, MetricsTracker.get().getActiveMs());
-            lp.triggerS = com.routerunner.adaptive.Adaptive.triggerS();
-            lp.pace = com.routerunner.adaptive.Adaptive.pace();
+            boolean vein = "vein".equals(sr.params.miner);
+            lp.triggerS = com.routerunner.adaptive.Adaptive.triggerS(vein);
+            lp.pace = com.routerunner.adaptive.Adaptive.pace(vein);
             lp.useNative = cfg.laneNative;
             if (cfg.laneNative) {
                 com.routerunner.lane.NativeLane.init(net.minecraftforge.fml.loading.FMLPaths.CONFIGDIR.get().resolve("routerunner").resolve("natives"));
@@ -697,11 +701,18 @@ public final class RouteService {
                     else LOG.warn("[Routerunner] native lane planner unavailable ({}); planning lanes in Java.", st);
                 }
             }
-            com.routerunner.lane.LegTimeModel model = com.routerunner.adaptive.Adaptive.planningModel();
+            com.routerunner.lane.LegTimeModel model = com.routerunner.adaptive.Adaptive.planningModel(vein);
+            Prune pr = prune(sr, chestsLocal, cfg, lp.triggerS);
+            if (pr.kept.isEmpty()) {
+                LOG.info("[Routerunner] every {} chest in {} is in a group under {} (rate {}/s x {} s per break); nothing worth routing ({}).",
+                        sr.targetType, sr.roomId, String.format(Locale.ROOT, "%.1f", pr.threshold),
+                        String.format(Locale.ROOT, "%.1f", pr.lambda), String.format(Locale.ROOT, "%.2f", pr.tHit), reason);
+                return null;
+            }
             com.routerunner.lane.LanePlanner planner = new com.routerunner.lane.LanePlanner(
-                    sr.grid, chestsLocal, sr.params.chainRange, sr.params.chainLimit, lp, model);
-            P start = com.routerunner.lane.Grid.snapInside(sr.grid, startLocal == null ? sr.exitLocal : startLocal);
-            P exit = com.routerunner.lane.Grid.snapInside(sr.grid, sr.exitLocal);
+                    pr.grid, pr.kept, sr.params.chainRange, sr.params.chainLimit, lp, model);
+            P start = com.routerunner.lane.Grid.snapInside(pr.grid, startLocal == null ? sr.exitLocal : startLocal);
+            P exit = com.routerunner.lane.Grid.snapInside(pr.grid, sr.exitLocal);
             com.routerunner.lane.LanePlanner.Plan plan = planner.plan(start, exit);
             if (plan.lanes.isEmpty()) {
                 LOG.error("[Routerunner] lane planner found nothing to sweep in {} ({}); falling back to the waypoint route.", sr.roomId, reason);
@@ -713,12 +724,45 @@ public final class RouteService {
             }
             com.routerunner.lane.LaneRoute lr = new com.routerunner.lane.LaneRoute(planner, plan, lp.pointMode ? "point" : "corridor",
                     sr.ox, sr.oy, sr.oz, MetricsTracker.get().getActiveMs());
+            lr.setPrune(pr.threshold, pr.lambda, pr.tHit, pr.groups, pr.chests);
             if (log) RunLog.lanePlan(sr.cellKey, sr.roomId, lr.mode, reason, plan.lanes.size(), lr);
             return lr;
         } catch (Throwable t) {
             LOG.error("[Routerunner] lane planner failed for {} ({}); falling back to the waypoint route.", sr.roomId, reason, t);
             return null;
         }
+    }
+
+    /** What {@link #prune} kept and dropped, and the numbers behind its threshold. */
+    private record Prune(java.util.List<P> kept, SolidGrid grid, double threshold, double lambda, double tHit, int groups, int chests) {}
+
+    /**
+     * Drop the chest groups too small to repay a break: a group (the chests one unlimited break could reach, i.e.
+     * touching chests for Vein Miner, chests within the chain range for Chain Miner) smaller than the running
+     * realized rate (chests per second, last two minutes) times the seconds one break costs is not worth its click
+     * (vein run 1: the optimum sat at that product, about 15 chests, worth +3 %). Dropped chests stay solid in the
+     * returned grid, so the planner walks and sees around them. No pruning until the rate is known, below a
+     * threshold of 2 (it could only drop single chests), or with {@code lanePrune} off.
+     */
+    private static Prune prune(SolvedRoute sr, java.util.List<P> chests, RouterunnerConfig cfg, double tHit) {
+        double lambda = RateCal.rate(MetricsTracker.get().getActiveMs());
+        double threshold = lambda * tHit;
+        if (!cfg.lanePrune || !(threshold >= 2.0)) return new Prune(chests, sr.grid, threshold, lambda, tHit, 0, 0);
+        int[][] comps = com.routerunner.solver.ChainModel.components(Math.max(1, sr.params.chainRange), chests);
+        java.util.List<P> kept = new java.util.ArrayList<>(chests.size());
+        java.util.List<P> dropped = new java.util.ArrayList<>();
+        int groups = 0;
+        for (int i = 0; i < chests.size(); i++) {
+            int size = comps[1][comps[0][i]];
+            if (size >= threshold) {
+                kept.add(chests.get(i));
+            } else {
+                dropped.add(chests.get(i));
+                if (comps[0][i] == i) groups++;
+            }
+        }
+        if (dropped.isEmpty()) return new Prune(chests, sr.grid, threshold, lambda, tHit, 0, 0);
+        return new Prune(kept, sr.grid.withoutTargets(dropped), threshold, lambda, tHit, groups, dropped.size());
     }
 
     /**
@@ -734,8 +778,8 @@ public final class RouteService {
             planner.P.bailAggression = cfg.laneBail;
             planner.P.exitWeight = cfg.laneExitWeight;
             planner.P.bailFloor = RateCal.bailFloor(cfg, MetricsTracker.get().getActiveMs());
-            P start = com.routerunner.lane.Grid.snapInside(sr.grid, startLocal == null ? sr.exitLocal : startLocal);
-            P exit = com.routerunner.lane.Grid.snapInside(sr.grid, sr.exitLocal);
+            P start = com.routerunner.lane.Grid.snapInside(planner.grid, startLocal == null ? sr.exitLocal : startLocal);
+            P exit = com.routerunner.lane.Grid.snapInside(planner.grid, sr.exitLocal);
             com.routerunner.lane.LanePlanner.Plan plan = planner.plan(start, exit, mask);
             if (plan.lanes.isEmpty() && (plan.exitPath == null || plan.exitPath.isEmpty())) {
                 LOG.error("[Routerunner] lane replan found nothing to sweep and no exit walk in {} ({}); keeping the old plan.", sr.roomId, reason);
@@ -747,6 +791,7 @@ public final class RouteService {
             }
             com.routerunner.lane.LaneRoute lr = new com.routerunner.lane.LaneRoute(planner, plan, old.mode, sr.ox, sr.oy, sr.oz,
                     MetricsTracker.get().getActiveMs());
+            lr.copyPrune(old);
             RunLog.lanePlan(sr.cellKey, sr.roomId, lr.mode, reason, plan.lanes.size(), lr);
             return lr;
         } catch (Throwable t) {
@@ -788,7 +833,7 @@ public final class RouteService {
                 double realized = (now - lr.runStartMs) / 1000.0;
                 if (realized > 0.5 && r.seconds > 0.05) RateCal.observe(r.seconds, realized);
                 com.routerunner.adaptive.Adaptive.onRunDone(r.travelS, lr.planner.P.pace, r.nTrig, r.penaltyS, realized,
-                        RateCal.breaksSince(lr.runStartMs));
+                        RateCal.breaksSince(lr.runStartMs), "vein".equals(sr.params.miner));
             }
             lr.advance(player, now);
             com.routerunner.lane.LaneRoute.Run nx = lr.current();
@@ -872,21 +917,41 @@ public final class RouteService {
 
     /**
      * The reference solver's parameters: its built-in tuned weights (fixed; the lane planner is what the player
-     * follows), the session bail, the Chain Miner tier and the player's speed.
+     * follows), the session bail, the mining ability (Chain or Vein Miner and its tier) and the player's speed.
+     * With {@code logMiner} (solves only), the first snapshot of a vault and every one whose mining ability differs
+     * from the last writes a {@code miner} record.
      */
-    private static RoutePlanner.Params buildParams() {
+    private static RoutePlanner.Params buildParams(boolean logMiner) {
         RoutePlanner.Params p = new RoutePlanner.Params();
         p.bail = roomsForHotSpot > 0 ? p.bailAggression * sessionHotSpotSum / roomsForHotSpot : 0.0;
-        int[] chain = ChainMinerInfo.rangeAndLimit();
-        p.chainRange = chain[0];
-        p.chainLimit = chain[1];
+        ChainMinerInfo.Miner m = ChainMinerInfo.current();
+        p.chainRange = m.range();
+        p.chainLimit = m.limit();
+        p.miner = m.mode();
+        p.minerSpec = m.spec();
+        p.minerTier = m.tier();
         p.speedAttr = PlayerSpeed.attribute(Minecraft.getInstance().player);
+        double[] reach = PlayerReach.read(Minecraft.getInstance().player);
+        p.reach = reach[0];
+        p.planReach = PlayerReach.plan(reach[0]);
+        String label = m.spec() + "|" + m.label() + "|" + String.format(Locale.ROOT, "%.2f", p.reach);
+        if (logMiner && !label.equals(lastMinerLabel)) {
+            boolean first = lastMinerLabel == null;
+            lastMinerLabel = label;
+            LOG.info("[Routerunner] mining ability: {} [{}], reach {} (forge {}, capped attribute {}), planning at {}{}", m.label(), m.spec(),
+                    String.format(Locale.ROOT, "%.2f", reach[0]), String.format(Locale.ROOT, "%.2f", reach[1]),
+                    String.format(Locale.ROOT, "%.2f", reach[2]), String.format(Locale.ROOT, "%.2f", p.planReach), first ? "" : " (changed)");
+            RunLog.miner(m, first ? "first" : "changed", reach, p.planReach);
+        }
         return p;
     }
 
+    /** The mining ability last written to the log this vault ({@code spec|label}); null until the first solve. */
+    private static volatile String lastMinerLabel = null;
+
     /** The parameter snapshot a solve would run with right now. */
     public static RoutePlanner.Params snapshotParams() {
-        return buildParams();
+        return buildParams(false);
     }
 
     /**
@@ -984,10 +1049,32 @@ public final class RouteService {
         if (gone > sr.userChests) sr.userChests = gone;
     }
 
+    /** {@code " vein"} for the HUD state when the room was planned for Vein Miner, else empty. */
+    private static String veinTag(SolvedRoute sr) {
+        return sr.params != null && "vein".equals(sr.params.miner) ? " vein" : "";
+    }
+
+    /**
+     * True when the room was planned for Vein Miner. Its runs feed the separate vein calibration (pace and per-hit
+     * cost); the shared leg model does not learn from it, because it was fitted on Chain Miner play and vein legs
+     * (few, huge bursts) are a different shape. The run log still records everything a later fit needs.
+     */
+    private static boolean veinRoom(SolvedRoute sr) {
+        if (sr.params == null || !"vein".equals(sr.params.miner)) return false;
+        if (!veinLearnPauseLogged) {
+            veinLearnPauseLogged = true;
+            LOG.info("[Routerunner] Vein Miner is equipped; the vein calibration learns from this vault, the shared leg model does not (the run log still records everything).");
+        }
+        return true;
+    }
+
+    private static volatile boolean veinLearnPauseLogged = false;
+
     /** Hand the room the player just left to the adaptive leg model (private copies; it learns on its own thread). */
     private static void learnRoom(SolvedRoute room) {
         try {
             if (room.grid == null || room.userBreaks.size() < 2 || room.userTrail.size() < 2) return;
+            if (veinRoom(room)) return;
             java.util.List<P> chests = new java.util.ArrayList<>(room.targetsWorld.size());
             for (BlockPos b : room.targetsWorld) chests.add(new P(b.getX() - room.ox, b.getY() - room.oy, b.getZ() - room.oz));
             java.util.List<Long> tps;
@@ -1016,6 +1103,7 @@ public final class RouteService {
             double[] follow = followDeviation(room.userTrail, room.plan.path);
             boolean routing = RouterunnerConfig.get().routingEnabled;
             double[] accuracy = routeAccuracy(room, follow);
+            if ("vein".equals(pm.miner)) room.bigGroups = bigGroups(room, com.routerunner.lane.LaneRoute.PRIORITY_MIN);
             RunLog.roomDiff(room, MetricsTracker.get().getLap(), routing, sec, user, solver, follow, accuracy);
             if (accuracy == null) {
                 LOG.info("[Routerunner] accuracy {}: not scored — fewer than 4 planned waypoints matched your {} breaks",
@@ -1038,6 +1126,55 @@ public final class RouteService {
         } catch (Throwable t) {
             LOG.error("[Routerunner] diff computation failed for {}", room.roomId, t);
         }
+    }
+
+    /**
+     * Vein Miner's big touching groups in a finished room (all its target chests at solve time, groups of at least
+     * {@code minSize}): {groups, hit, missed, missed chests, minSize}. A group is hit when any of its chests is among
+     * the player's breaks, and missed when it was not hit although the player's eye came within their block reach
+     * of one of its chests (walls not checked). What deep-blue priority breaks are meant to bring down.
+     */
+    private static int[] bigGroups(SolvedRoute room, int minSize) {
+        java.util.List<P> chests = new java.util.ArrayList<>(room.targetsWorld.size());
+        for (BlockPos b : room.targetsWorld) chests.add(new P(b.getX() - room.ox, b.getY() - room.oy, b.getZ() - room.oz));
+        int[][] comps = com.routerunner.solver.ChainModel.components(1, chests);
+        java.util.Set<Long> broken = new java.util.HashSet<>();
+        for (double[] b : room.userBreaks) broken.add(pack((int) Math.round(b[1]), (int) Math.round(b[2]), (int) Math.round(b[3])));
+        java.util.Map<Integer, java.util.List<P>> members = new java.util.HashMap<>();
+        for (int i = 0; i < chests.size(); i++) {
+            if (comps[1][comps[0][i]] >= minSize) members.computeIfAbsent(comps[0][i], k -> new java.util.ArrayList<>()).add(chests.get(i));
+        }
+        double reach = room.params.reach;
+        double r2 = reach * reach;
+        int hit = 0, missed = 0, missedChests = 0;
+        for (java.util.List<P> g : members.values()) {
+            boolean isHit = false;
+            int x0 = Integer.MAX_VALUE, y0 = Integer.MAX_VALUE, z0 = Integer.MAX_VALUE, x1 = Integer.MIN_VALUE, y1 = Integer.MIN_VALUE, z1 = Integer.MIN_VALUE;
+            for (P c : g) {
+                if (broken.contains(pack(c.x(), c.y(), c.z()))) isHit = true;
+                x0 = Math.min(x0, c.x()); y0 = Math.min(y0, c.y()); z0 = Math.min(z0, c.z());
+                x1 = Math.max(x1, c.x()); y1 = Math.max(y1, c.y()); z1 = Math.max(z1, c.z());
+            }
+            if (isHit) { hit++; continue; }
+            boolean near = false;
+            for (int t = 0; t < room.userTrail.size() && !near; t += 2) {
+                double[] s = room.userTrail.get(t);
+                double ex = s[0], ey = s[1] + 1.62, ez = s[2];
+                double bx = Math.max(x0 - ex, Math.max(0, ex - (x1 + 1))), by = Math.max(y0 - ey, Math.max(0, ey - (y1 + 1))),
+                        bz = Math.max(z0 - ez, Math.max(0, ez - (z1 + 1)));
+                if (bx * bx + by * by + bz * bz > r2) continue;
+                for (P c : g) {
+                    double dx = c.x() + 0.5 - ex, dy = c.y() + 0.5 - ey, dz = c.z() + 0.5 - ez;
+                    if (dx * dx + dy * dy + dz * dz <= r2) { near = true; break; }
+                }
+            }
+            if (near) { missed++; missedChests += g.size(); }
+        }
+        return new int[]{members.size(), hit, missed, missedChests, minSize};
+    }
+
+    private static long pack(int x, int y, int z) {
+        return (((long) x) << 40) | (((long) (y + 512)) << 20) | (long) (z + 512);
     }
 
     /** Sum {@link RoutePlanner#scoreTrajectory} over the plan's walk and drop runs, skipping trident/sprint/gap. */
@@ -1297,6 +1434,8 @@ public final class RouteService {
         final java.util.List<double[]> userTrail = new java.util.ArrayList<>();
         /** Target chests of this room the player broke: {activeMs, lx, ly, lz}. */
         final java.util.List<double[]> userBreaks = new java.util.ArrayList<>();
+        /** Vein Miner rooms: {groups, hit, missed, missed chests, min size} of big touching groups, set when the room's diff is logged. */
+        volatile int[] bigGroups = null;
         /** Active-clock times of teleports while this room was current (guarded by itself). */
         final java.util.List<Long> teleportMs = new java.util.ArrayList<>();
         /** Lazily built set over {@link #targetsWorld}. */

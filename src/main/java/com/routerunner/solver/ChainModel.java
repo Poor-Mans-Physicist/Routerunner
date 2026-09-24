@@ -26,6 +26,15 @@ public final class ChainModel {
 
     private final List<P> pts;
     private final Map<Long, List<Integer>> buckets;
+    /**
+     * Range 1 (Vein Miner) only: component root (lowest chest index) per chest and component size per root, the
+     * static 26-connected components; null for chain ranges. Exact for live chests while every trigger clears its
+     * whole live component, i.e. while no component is larger than {@link #limit}.
+     */
+    private final int[] comp;
+    private final int[] compSize;
+    /** Largest component, 0 for chain ranges. */
+    public final int compMax;
 
     public ChainModel(int range, int limit, List<P> pts) {
         this.range = Math.max(0, range);
@@ -33,6 +42,76 @@ public final class ChainModel {
         this.bucket = Math.max(1, this.range + 1);
         this.pts = pts;
         this.buckets = buildBuckets(pts);
+        if (this.range <= 1 && this.limit > 1) {
+            int[][] cs = label(this);
+            int max = 0;
+            for (int v : cs[1]) max = Math.max(max, v);
+            this.comp = cs[0];
+            this.compSize = cs[1];
+            this.compMax = max;
+        } else {
+            this.comp = null;
+            this.compSize = null;
+            this.compMax = 0;
+        }
+    }
+
+    /**
+     * {root per chest (the lowest index of its group), size per root}: the groups of chests linked by one break step
+     * of {@code m}'s range, i.e. what a break could ever reach with no limit.
+     */
+    private static int[][] label(ChainModel m) {
+        int n = m.pts.size();
+        boolean[] all = new boolean[n];
+        java.util.Arrays.fill(all, true);
+        int[] c = new int[n];
+        int[] sz = new int[n];
+        java.util.Arrays.fill(c, -1);
+        Deque<Integer> stack = new ArrayDeque<>();
+        for (int s0 = 0; s0 < n; s0++) {
+            if (c[s0] >= 0) continue;
+            c[s0] = s0;
+            stack.push(s0);
+            int k = 0;
+            while (!stack.isEmpty()) {
+                int h = stack.pop();
+                k++;
+                for (int j : m.neighbors(h, all)) {
+                    if (c[j] < 0) {
+                        c[j] = s0;
+                        stack.push(j);
+                    }
+                }
+            }
+            sz[s0] = k;
+        }
+        return new int[][]{c, sz};
+    }
+
+    /** The groups of {@link #label} for any range, e.g. the Chain Miner's when deciding which chests are worth a break. */
+    public static int[][] components(int range, List<P> pts) {
+        ChainModel m = new ChainModel(range, Integer.MAX_VALUE, pts);
+        return m.comp != null ? new int[][]{m.comp, m.compSize} : label(m);
+    }
+
+    /** Size of chest i's touching group (range 1 only; 0 for chain ranges). */
+    public int compSizeOf(int i) {
+        return comp == null ? 0 : compSize[comp[i]];
+    }
+
+    /** True at range 1, where the candidate pre-filter scores whole components ({@link #preKey}, {@link #preValue}). */
+    public boolean hasComponents() {
+        return comp != null;
+    }
+
+    /** Pre-filter stamp key of chest i: the chest itself, or at range 1 its component root. */
+    public int preKey(int i) {
+        return comp == null ? i : comp[i];
+    }
+
+    /** Pre-filter value of chest i: 1, or at range 1 its component's size capped at {@link #limit}. */
+    public int preValue(int i) {
+        return comp == null ? 1 : Math.min(compSize[comp[i]], limit);
     }
 
     private Map<Long, List<Integer>> buildBuckets(List<P> list) {

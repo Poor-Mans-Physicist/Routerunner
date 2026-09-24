@@ -33,6 +33,11 @@ import java.util.concurrent.TimeUnit;
  * model-to-real conversion. Off: the bundled model at pace 1 and the bundled charge, the 0.18.0 behaviour; nothing
  * is learned and the saved state is kept untouched.
  *
+ * <p>Tier 0 is kept per mining ability: Chain Miner and Vein Miner each have their own pace and per-burst cost
+ * ({@code run_calibration.json}, {@code run_calibration_vein.json}), because a vein hit is a different action from a
+ * chain trigger. The vein pace prior is the chain pace learned so far (movement carried over in vein run 1: realized
+ * over planned room time 1.05 at the chain pace). Tier 1 (the leg model) is shared and only learns from chain rooms.
+ *
  * <p>Learning happens on its own low-priority thread (rows need a path search per leg) so it never delays a solve.
  * Until the vault passes the density gate ({@link VaultGate}) every observation is staged, then applied on a pass
  * or dropped on a rejection. State lives in {@code config/routerunner/adaptive/} and is saved after each room and at
@@ -48,6 +53,11 @@ public final class Adaptive {
     /** Breaks and seconds a lane run needs before its timing counts. */
     private static final int RUN_MIN_BREAKS = 8;
     private static final double RUN_MIN_S = 0.5;
+    /**
+     * Vein Miner's prior per-hit cost (real seconds): the fit on vein run 1 (vault 2026-09-23 21:51, 125 rooms,
+     * room time = 0.10 + 0.0555 x blocks + 0.236 x hits, R2 0.85).
+     */
+    public static final double VEIN_PRIOR_B = 0.24;
 
     private static final ExecutorService LEARN = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "routerunner-learn");
@@ -58,9 +68,10 @@ public final class Adaptive {
 
     private static final Object LOCK = new Object();
     private static RunCalibration calib;
+    private static RunCalibration calibVein;
     private static LegLearner legs;
     private static final List<Runnable> staged = new ArrayList<>();
-    private static double loggedA = Double.NaN, loggedB = Double.NaN;
+    private static final double[] loggedA = {Double.NaN, Double.NaN}, loggedB = {Double.NaN, Double.NaN};
 
     private Adaptive() {}
 
@@ -78,12 +89,17 @@ public final class Adaptive {
             if (cs != null && !calib.restore(cs)) {
                 LOG.warn("[Routerunner] adaptive run calibration was saved against a different per-burst prior; starting it fresh.");
             }
+            calibVein = new RunCalibration(calib.a(), VEIN_PRIOR_B);
+            RunCalibration.State vs = read(dir().resolve("run_calibration_vein.json"), RunCalibration.State.class);
+            if (vs != null && !calibVein.restore(vs)) {
+                LOG.warn("[Routerunner] adaptive Vein Miner calibration was saved against a different per-hit prior; starting it fresh.");
+            }
             LegLearner.State ls = read(dir().resolve("leg_model.json"), LegLearner.State.class);
             if (ls != null && !legs.restore(ls)) {
                 LOG.warn("[Routerunner] adaptive leg model was saved against a different bundled model (or is malformed); starting it fresh from the new prior.");
             }
-            LOG.info("[Routerunner] adaptive model loaded: pace {} , {} s per burst ({} runs), {} legs learned.",
-                    f3(calib.a()), f3(calib.b()), calib.n(), legs.n());
+            LOG.info("[Routerunner] adaptive model loaded: chain pace {}, {} s per burst ({} runs); vein pace {}, {} s per hit ({} runs); {} legs learned.",
+                    f3(calib.a()), f3(calib.b()), calib.n(), f3(calibVein.a()), f3(calibVein.b()), calibVein.n(), legs.n());
         }
     }
 
@@ -91,36 +107,45 @@ public final class Adaptive {
         return RouterunnerConfig.get().adaptiveLearning;
     }
 
-    /** The leg model the planner should use now: the adapted fit times the pace when on, the bundled model when off. */
-    public static LegTimeModel planningModel() {
+    private static RunCalibration calibFor(boolean vein) {
+        return vein ? calibVein : calib;
+    }
+
+    /**
+     * The leg model the planner should use now: the adapted fit times the mining ability's pace when on, the
+     * bundled model when off.
+     */
+    public static LegTimeModel planningModel(boolean vein) {
         ensureLoaded();
         if (!enabled()) return legs.prior();
-        return legs.model().scaled(calib.a());
+        return legs.model().scaled(calibFor(vein).a());
     }
 
-    /** Seconds the planner charges per chain trigger. */
-    public static double triggerS() {
+    /** Seconds the planner charges per chain trigger or vein hit. */
+    public static double triggerS(boolean vein) {
         ensureLoaded();
-        return enabled() ? calib.b() : calib.priorB();
+        RunCalibration c = calibFor(vein);
+        return enabled() ? c.b() : c.priorB();
     }
 
-    /** The pace folded into {@link #planningModel()}. */
-    public static double pace() {
+    /** The pace folded into {@link #planningModel(boolean)}. */
+    public static double pace(boolean vein) {
         ensureLoaded();
-        return enabled() ? calib.a() : 1.0;
+        return enabled() ? calibFor(vein).a() : 1.0;
     }
 
     /**
      * A lane run finished while engaged: fold its realized time into tier 0. {@code travelS} and {@code penaltyS}
      * are the run's planned travel (at the pace it was planned with) and fixed penalties.
      */
-    public static void onRunDone(double travelS, double pace, double nTrig, double penaltyS, double realizedS, int breaks) {
+    public static void onRunDone(double travelS, double pace, double nTrig, double penaltyS, double realizedS, int breaks,
+                                 boolean vein) {
         if (!enabled() || breaks < RUN_MIN_BREAKS || realizedS < RUN_MIN_S || pace <= 0) return;
         ensureLoaded();
         final double t = travelS / pace, y = realizedS - penaltyS;
         stage(() -> {
-            calib.observe(t, nTrig, y);
-            maybeLogCalib("moved");
+            calibFor(vein).observe(t, nTrig, y);
+            maybeLogCalib("moved", vein);
         });
     }
 
@@ -198,8 +223,10 @@ public final class Adaptive {
         if (!enabled()) return;
         ensureLoaded();
         legs.newVault();
-        loggedA = Double.NaN;
-        maybeLogCalib("vault");
+        loggedA[0] = Double.NaN;
+        loggedA[1] = Double.NaN;
+        maybeLogCalib("vault", false);
+        maybeLogCalib("vault", true);
     }
 
     /** Vault exit: wait (briefly) for the last room's learning so its records land in this vault's log, then save. */
@@ -217,9 +244,9 @@ public final class Adaptive {
             }
         }
         if (enabled()) {
-            LOG.info("[Routerunner] adaptive model after this vault: pace {}, {} s per burst ({} runs, {} rejected), {} legs, intercept shift {}{}.",
-                    f3(calib.a()), f3(calib.b()), calib.n(), calib.rejected(), legs.n(), f3(legs.interceptShift()),
-                    legs.fellBack() ? ", FELL BACK to the bundled model" : "");
+            LOG.info("[Routerunner] adaptive model after this vault: chain pace {}, {} s per burst ({} runs, {} rejected); vein pace {}, {} s per hit ({} runs, {} rejected); {} legs, intercept shift {}{}.",
+                    f3(calib.a()), f3(calib.b()), calib.n(), calib.rejected(), f3(calibVein.a()), f3(calibVein.b()), calibVein.n(),
+                    calibVein.rejected(), legs.n(), f3(legs.interceptShift()), legs.fellBack() ? ", FELL BACK to the bundled model" : "");
         }
         save();
     }
@@ -228,9 +255,11 @@ public final class Adaptive {
     public static void resetLearned() {
         ensureLoaded();
         calib.clear();
+        calibVein.clear();
         legs.clear();
         try {
             Files.deleteIfExists(dir().resolve("run_calibration.json"));
+            Files.deleteIfExists(dir().resolve("run_calibration_vein.json"));
             Files.deleteIfExists(dir().resolve("leg_model.json"));
             LOG.info("[Routerunner] adaptive model reset to the bundled model; saved state deleted.");
         } catch (Exception e) {
@@ -242,24 +271,29 @@ public final class Adaptive {
     public static String statusLine() {
         ensureLoaded();
         if (!enabled()) return "Adaptive learning: Off";
-        if (calib.n() == 0 && legs.n() == 0) return "Adaptive learning: On (nothing learned yet)";
-        return String.format(Locale.ROOT, "Adaptive: On, pace x%.2f, %.2f s/burst", calib.a(), calib.b());
+        if (calib.n() == 0 && calibVein.n() == 0 && legs.n() == 0) return "Adaptive learning: On (nothing learned yet)";
+        String s = String.format(Locale.ROOT, "Adaptive: On, pace x%.2f, %.2f s/burst", calib.a(), calib.b());
+        if (calibVein.n() > 0) s += String.format(Locale.ROOT, "; vein x%.2f, %.2f s/hit", calibVein.a(), calibVein.b());
+        return s;
     }
 
     /** A tooltip-length summary: runs and legs learned and whether the leg model fell back. */
     public static String detailLine() {
         ensureLoaded();
-        return String.format(Locale.ROOT, "%d runs, %d legs learned%s", calib.n(), legs.n(), legs.fellBack() ? ", leg model fell back" : "");
+        return String.format(Locale.ROOT, "%d chain runs, %d vein runs, %d legs learned%s", calib.n(), calibVein.n(), legs.n(),
+                legs.fellBack() ? ", leg model fell back" : "");
     }
 
-    private static void maybeLogCalib(String reason) {
-        double a = calib.a(), b = calib.b();
-        boolean moved = Double.isNaN(loggedA) || Math.abs(a - loggedA) > CALIB_LOG_STEP * loggedA
-                || Math.abs(b - loggedB) > CALIB_LOG_STEP * loggedB;
+    private static void maybeLogCalib(String reason, boolean vein) {
+        RunCalibration c = calibFor(vein);
+        int m = vein ? 1 : 0;
+        double a = c.a(), b = c.b();
+        boolean moved = Double.isNaN(loggedA[m]) || Math.abs(a - loggedA[m]) > CALIB_LOG_STEP * loggedA[m]
+                || Math.abs(b - loggedB[m]) > CALIB_LOG_STEP * loggedB[m];
         if (!moved) return;
-        loggedA = a;
-        loggedB = b;
-        RunLog.calib(reason, a, b, calib.n(), calib.rejected());
+        loggedA[m] = a;
+        loggedB[m] = b;
+        RunLog.calib(reason, vein ? "vein" : "chain", a, b, c.n(), c.rejected());
     }
 
     private static void save() {
@@ -267,6 +301,7 @@ public final class Adaptive {
         try {
             Files.createDirectories(dir());
             write(dir().resolve("run_calibration.json"), calib.state());
+            write(dir().resolve("run_calibration_vein.json"), calibVein.state());
             write(dir().resolve("leg_model.json"), legs.state());
         } catch (Exception e) {
             LOG.error("[Routerunner] could not save the adaptive model to {}; what was learned this session is kept in memory only.", dir(), e);

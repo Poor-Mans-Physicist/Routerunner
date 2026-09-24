@@ -43,6 +43,21 @@ public final class SolidGrid {
         if (inBounds(x, y, z)) target[idx(x, y, z)] = true;
     }
 
+    /**
+     * A copy in which {@code cells} are no longer target chests: they stay solid, so they block walking and line of
+     * sight like any other block. Clearance is re-baked when this grid had it baked.
+     */
+    public SolidGrid withoutTargets(java.util.Collection<P> cells) {
+        SolidGrid g = new SolidGrid(sx, sy, sz);
+        System.arraycopy(solid, 0, g.solid, 0, solid.length);
+        System.arraycopy(target, 0, g.target, 0, target.length);
+        for (P c : cells) {
+            if (inBounds(c.x(), c.y(), c.z())) g.target[idx(c.x(), c.y(), c.z())] = false;
+        }
+        if (clearanceFly != null) g.bakeClearance();
+        return g;
+    }
+
     public boolean isSolid(int x, int y, int z) {
         if (!inBounds(x, y, z)) return true;
         return solid[idx(x, y, z)];

@@ -28,7 +28,12 @@ public final class RunCalibration {
     private double a, b;
 
     public RunCalibration(double b0) {
-        this.a0 = 1.0;
+        this(1.0, b0);
+    }
+
+    /** A calibration whose pace prior is {@code a0} instead of the bundled model's 1.0. */
+    public RunCalibration(double a0, double b0) {
+        this.a0 = a0;
         this.b0 = b0;
         this.a = a0;
         this.b = b0;
