@@ -10,7 +10,8 @@ that helps you loot more chests per minute in vaults.
 - **Lane route.** A planner solves each room as you enter it, and draws the route on the floor: a chain of short runs
   through the densest chests, a heat map over the chests to mine, green markers on the next target cluster, purple
   arrows for dashes, and a green exit path when the room becomes sparse enough to not be worth looting further.
-  It assumes Chain Miner; without it the routes will be wrong.
+  It supports both chain and vein miner; the overlays will be slightly different depending on which you use, and
+  vein miner is generally preferrable in very large vaults with over 90 total chest improving modifiers. 
 - **Self Learning.** The solver is self learning, meaning it watches you while you play in real time and adapts
   to your playstyle to create the fastest routes specific to the way you move. It takes some time to warm up,
   but should generally make using the solver feel much better after using it for several minutes as it adapts.
