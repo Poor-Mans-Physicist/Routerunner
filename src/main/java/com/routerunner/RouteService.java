@@ -202,7 +202,7 @@ public final class RouteService {
         sessionHotSpotSum = 0;
         roomsForHotSpot = 0;
         lastMinerLabel = null;
-        veinLearnPauseLogged = false;
+        hitStartMs = -1;
         pendingHallwayBlocks = 0;
         lastPlayerPos = null;
         measuredRoom = null;
@@ -933,15 +933,19 @@ public final class RouteService {
         p.speedAttr = PlayerSpeed.attribute(Minecraft.getInstance().player);
         double[] reach = PlayerReach.read(Minecraft.getInstance().player);
         p.reach = reach[0];
-        p.planReach = PlayerReach.plan(reach[0]);
-        String label = m.spec() + "|" + m.label() + "|" + String.format(Locale.ROOT, "%.2f", p.reach);
+        double[] used = com.routerunner.adaptive.Adaptive.learnedReach();
+        p.usedReach = used[0];
+        p.reachHits = (int) used[1];
+        p.planReach = PlayerReach.plan(reach[0], used[0]);
+        String label = m.spec() + "|" + m.label() + "|" + String.format(Locale.ROOT, "%.2f|%.1f", p.reach, p.planReach);
         if (logMiner && !label.equals(lastMinerLabel)) {
             boolean first = lastMinerLabel == null;
             lastMinerLabel = label;
-            LOG.info("[Routerunner] mining ability: {} [{}], reach {} (forge {}, capped attribute {}), planning at {}{}", m.label(), m.spec(),
-                    String.format(Locale.ROOT, "%.2f", reach[0]), String.format(Locale.ROOT, "%.2f", reach[1]),
-                    String.format(Locale.ROOT, "%.2f", reach[2]), String.format(Locale.ROOT, "%.2f", p.planReach), first ? "" : " (changed)");
-            RunLog.miner(m, first ? "first" : "changed", reach, p.planReach);
+            LOG.info("[Routerunner] mining ability: {} [{}], reach {} (forge {}, capped attribute {}), your hits reach {} ({} hits), planning at {}{}",
+                    m.label(), m.spec(), String.format(Locale.ROOT, "%.2f", reach[0]), String.format(Locale.ROOT, "%.2f", reach[1]),
+                    String.format(Locale.ROOT, "%.2f", reach[2]), String.format(Locale.ROOT, "%.2f", used[0]), (int) used[1],
+                    String.format(Locale.ROOT, "%.2f", p.planReach), first ? "" : " (changed)");
+            RunLog.miner(m, first ? "first" : "changed", reach, used, p.planReach);
         }
         return p;
     }
@@ -961,6 +965,7 @@ public final class RouteService {
     public static void onChestBroken(BlockPos pos) {
         RateCal.onBreak(MetricsTracker.get().getActiveMs());
         if (pos != null) DensityTracker.onBreak(pos);
+        if (pos != null) noteHit(pos);
         SolvedRoute lsr = current;
         if (lsr != null && lsr.lane != null) lsr.lane.heatDirty = true;
         SolvedRoute sr = current;
@@ -1054,27 +1059,33 @@ public final class RouteService {
         return sr.params != null && "vein".equals(sr.params.miner) ? " vein" : "";
     }
 
-    /**
-     * True when the room was planned for Vein Miner. Its runs feed the separate vein calibration (pace and per-hit
-     * cost); the shared leg model does not learn from it, because it was fitted on Chain Miner play and vein legs
-     * (few, huge bursts) are a different shape. The run log still records everything a later fit needs.
-     */
-    private static boolean veinRoom(SolvedRoute sr) {
-        if (sr.params == null || !"vein".equals(sr.params.miner)) return false;
-        if (!veinLearnPauseLogged) {
-            veinLearnPauseLogged = true;
-            LOG.info("[Routerunner] Vein Miner is equipped; the vein calibration learns from this vault, the shared leg model does not (the run log still records everything).");
-        }
-        return true;
-    }
+    /** Breaks within this of the first break of a hit belong to that hit (one click reaches the client over a few ticks). */
+    private static final long HIT_MERGE_MS = 250;
+    private static long hitStartMs = -1;
+    private static double hitMin = Double.MAX_VALUE;
 
-    private static volatile boolean veinLearnPauseLogged = false;
+    /**
+     * Group breaks into hits and hand each finished hit's distance (the player's feet cell to the nearest chest the hit
+     * broke, the planner's reach metric) to the adaptive break reach. The clicked chest is the nearest one.
+     */
+    private static void noteHit(BlockPos pos) {
+        Player player = Minecraft.getInstance().player;
+        if (player == null) return;
+        long now = System.currentTimeMillis();
+        if (hitStartMs < 0 || now - hitStartMs > HIT_MERGE_MS) {
+            if (hitStartMs >= 0) com.routerunner.adaptive.Adaptive.onHit(hitMin);
+            hitStartMs = now;
+            hitMin = Double.MAX_VALUE;
+        }
+        BlockPos feet = player.blockPosition();
+        double dx = pos.getX() - feet.getX(), dy = pos.getY() - feet.getY(), dz = pos.getZ() - feet.getZ();
+        hitMin = Math.min(hitMin, Math.sqrt(dx * dx + dy * dy + dz * dz));
+    }
 
     /** Hand the room the player just left to the adaptive leg model (private copies; it learns on its own thread). */
     private static void learnRoom(SolvedRoute room) {
         try {
             if (room.grid == null || room.userBreaks.size() < 2 || room.userTrail.size() < 2) return;
-            if (veinRoom(room)) return;
             java.util.List<P> chests = new java.util.ArrayList<>(room.targetsWorld.size());
             for (BlockPos b : room.targetsWorld) chests.add(new P(b.getX() - room.ox, b.getY() - room.oy, b.getZ() - room.oz));
             java.util.List<Long> tps;

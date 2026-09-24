@@ -35,8 +35,15 @@ import java.util.concurrent.TimeUnit;
  *
  * <p>Tier 0 is kept per mining ability: Chain Miner and Vein Miner each have their own pace and per-burst cost
  * ({@code run_calibration.json}, {@code run_calibration_vein.json}), because a vein hit is a different action from a
- * chain trigger. The vein pace prior is the chain pace learned so far (movement carried over in vein run 1: realized
- * over planned room time 1.05 at the chain pace). Tier 1 (the leg model) is shared and only learns from chain rooms.
+ * chain trigger. The leg model and the break reach are shared. The vein pace prior is the chain pace learned so far (movement carried over in vein run 1: realized
+ * over planned room time 1.05 at the chain pace). Tier 1 (the leg model) learns from both: the chain-fitted legs
+ * predicted vein legs about as well as chain legs (R2 0.60-0.67 vs 0.64-0.69, time bias ~5 %, 7 vaults replayed).
+ *
+ * <p>Break reach: the distance (feet cell to the chest block) of each hit the player takes is kept over the last
+ * {@link #REACH_WINDOW} hits; the planner plans at its {@link #REACH_Q} quantile, the prior {@link #REACH_PRIOR} until
+ * {@link #REACH_MIN_HITS} hits are in. A hit's distance is to the nearest chest it broke, which is what the planner's
+ * reach test asks of a group (any chest within reach). Both vein runs measured p85 5.0 this way, whether planned at
+ * 4.5 (run 1) or at 7.0 (run 2, where the calibration inflated to absorb hits the player never took).
  *
  * <p>Learning happens on its own low-priority thread (rows need a path search per leg) so it never delays a solve.
  * Until the vault passes the density gate ({@link VaultGate}) every observation is staged, then applied on a pass
@@ -58,6 +65,11 @@ public final class Adaptive {
      * room time = 0.10 + 0.0555 x blocks + 0.236 x hits, R2 0.85).
      */
     public static final double VEIN_PRIOR_B = 0.24;
+    /** Hits kept for the break-reach quantile, the quantile planned at, the hits needed first and the reach before. */
+    public static final int REACH_WINDOW = 600, REACH_MIN_HITS = 100;
+    public static final double REACH_Q = 0.85, REACH_PRIOR = 5.0;
+    /** A hit further than this from the player's feet is a chain or vein spill, not a hit the player took. */
+    public static final double REACH_MAX_SAMPLE = 9.0;
 
     private static final ExecutorService LEARN = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "routerunner-learn");
@@ -70,6 +82,7 @@ public final class Adaptive {
     private static RunCalibration calib;
     private static RunCalibration calibVein;
     private static LegLearner legs;
+    private static final java.util.ArrayDeque<Double> hitReach = new java.util.ArrayDeque<>();
     private static final List<Runnable> staged = new ArrayList<>();
     private static final double[] loggedA = {Double.NaN, Double.NaN}, loggedB = {Double.NaN, Double.NaN};
 
@@ -93,6 +106,11 @@ public final class Adaptive {
             RunCalibration.State vs = read(dir().resolve("run_calibration_vein.json"), RunCalibration.State.class);
             if (vs != null && !calibVein.restore(vs)) {
                 LOG.warn("[Routerunner] adaptive Vein Miner calibration was saved against a different per-hit prior; starting it fresh.");
+            }
+            ReachState rs = read(dir().resolve("reach.json"), ReachState.class);
+            if (rs != null && rs.hits != null) {
+                for (double d : rs.hits) if (d > 0 && d <= REACH_MAX_SAMPLE) hitReach.addLast(d);
+                while (hitReach.size() > REACH_WINDOW) hitReach.pollFirst();
             }
             LegLearner.State ls = read(dir().resolve("leg_model.json"), LegLearner.State.class);
             if (ls != null && !legs.restore(ls)) {
@@ -119,6 +137,35 @@ public final class Adaptive {
         ensureLoaded();
         if (!enabled()) return legs.prior();
         return legs.model().scaled(calibFor(vein).a());
+    }
+
+    /** Saved form of the break-reach window. */
+    static final class ReachState {
+        double[] hits;
+    }
+
+    /** A hit the player took, {@code dist} blocks from their feet cell to the chest block; learned when adaptive learning is on. */
+    public static void onHit(double dist) {
+        if (!enabled() || !(dist > 0) || dist > REACH_MAX_SAMPLE) return;
+        ensureLoaded();
+        synchronized (hitReach) {
+            hitReach.addLast(dist);
+            while (hitReach.size() > REACH_WINDOW) hitReach.pollFirst();
+        }
+    }
+
+    /**
+     * {break reach to plan at, hits it rests on}: the {@link #REACH_Q} quantile of the recent hits once
+     * {@link #REACH_MIN_HITS} are in, else {@link #REACH_PRIOR}; always the prior with adaptive learning off.
+     */
+    public static double[] learnedReach() {
+        ensureLoaded();
+        double[] v;
+        synchronized (hitReach) {
+            v = hitReach.stream().mapToDouble(Double::doubleValue).sorted().toArray();
+        }
+        if (!enabled() || v.length < REACH_MIN_HITS) return new double[]{REACH_PRIOR, v.length};
+        return new double[]{v[(int) Math.floor(REACH_Q * (v.length - 1))], v.length};
     }
 
     /** Seconds the planner charges per chain trigger or vein hit. */
@@ -257,9 +304,13 @@ public final class Adaptive {
         calib.clear();
         calibVein.clear();
         legs.clear();
+        synchronized (hitReach) {
+            hitReach.clear();
+        }
         try {
             Files.deleteIfExists(dir().resolve("run_calibration.json"));
             Files.deleteIfExists(dir().resolve("run_calibration_vein.json"));
+            Files.deleteIfExists(dir().resolve("reach.json"));
             Files.deleteIfExists(dir().resolve("leg_model.json"));
             LOG.info("[Routerunner] adaptive model reset to the bundled model; saved state deleted.");
         } catch (Exception e) {
@@ -302,6 +353,11 @@ public final class Adaptive {
             Files.createDirectories(dir());
             write(dir().resolve("run_calibration.json"), calib.state());
             write(dir().resolve("run_calibration_vein.json"), calibVein.state());
+            ReachState rs = new ReachState();
+            synchronized (hitReach) {
+                rs.hits = hitReach.stream().mapToDouble(Double::doubleValue).toArray();
+            }
+            write(dir().resolve("reach.json"), rs);
             write(dir().resolve("leg_model.json"), legs.state());
         } catch (Exception e) {
             LOG.error("[Routerunner] could not save the adaptive model to {}; what was learned this session is kept in memory only.", dir(), e);

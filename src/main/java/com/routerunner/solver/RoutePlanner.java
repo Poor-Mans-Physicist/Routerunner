@@ -96,8 +96,13 @@ public final class RoutePlanner {
         public String miner = "default";
         public String minerSpec = null;
         public int minerTier = -1;
-        /** Game block reach (see PlayerReach) and the lane planner's break reach derived from it. */
+        /**
+         * Game block reach (see PlayerReach), the reach the player's hits use (learned quantile, or the prior) and the
+         * hits behind it, and the lane planner's break reach derived from them.
+         */
         public double reach = 5.0;
+        public double usedReach = 6.0;
+        public int reachHits = 0;
         public double planReach = 4.5;
         /** Player MOVEMENT_SPEED attribute at solve time; logged only, no cost term reads it. */
         public double speedAttr = 0.1;

@@ -42,7 +42,7 @@ import java.util.stream.Stream;
 public final class RunLog {
     private static final Logger LOG = LogUtils.getLogger();
     /** Run-log format version, stamped on vault_enter. */
-    public static final int LOG_VERSION = 21;
+    public static final int LOG_VERSION = 22;
     private static final SimpleDateFormat FILE_FMT = new SimpleDateFormat("yyyyMMdd_HHmmss");
     /** Maximum events buffered before the vault id resolves. */
     private static final int BUFFER_CAP = 3000;
@@ -671,9 +671,10 @@ public final class RunLog {
      * The mining ability the planner routes with: on the first solve of a vault and whenever it changes. Range 1 is
      * Vein Miner (touching chests only); {@code mode} {@code default} means the ability tree was unreadable and the
      * planner fell back to a 6/32 chain. Also carries the block reach ({@code reach} = min of Forge's survival reach
-     * and the vault-capped attribute) and the break reach the lane planner uses ({@code planReach}).
+     * and the vault-capped attribute), the reach the player's hits actually use ({@code usedReach}, the learned quantile
+     * over {@code reachHits} hits, or the prior) and the break reach the lane planner uses ({@code planReach}).
      */
-    public static synchronized void miner(ChainMinerInfo.Miner m, String reason, double[] reach, double planReach) {
+    public static synchronized void miner(ChainMinerInfo.Miner m, String reason, double[] reach, double[] used, double planReach) {
         write(head("miner", 240).append(",\"reason\":").append(quote(reason))
                 .append(",\"mode\":").append(quote(m.mode()))
                 .append(",\"spec\":").append(quote(m.spec()))
@@ -683,6 +684,8 @@ public final class RunLog {
                 .append(",\"reach\":").append(r2(reach[0]))
                 .append(",\"reachForge\":").append(r2(reach[1]))
                 .append(",\"reachAttr\":").append(r2(reach[2]))
+                .append(",\"usedReach\":").append(r2(used[0]))
+                .append(",\"reachHits\":").append((int) used[1])
                 .append(",\"planReach\":").append(r2(planReach))
                 .append("}\n").toString(), true);
     }
