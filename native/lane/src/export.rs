@@ -5,7 +5,7 @@
 use crate::grid::{standable_p, P};
 use crate::jcompat::jdouble;
 use crate::jcompat::jround;
-use crate::planner::{Plan, Room};
+use crate::planner::{Plan, Room, Trigger};
 
 pub enum J {
     Null,
@@ -229,6 +229,23 @@ pub fn export(r: &Room, plan: &Plan, ox: i32, oy: i32, oz: i32, t_entry: i64) ->
     ])
 }
 
+/// Triggers as `[[x, y, z, chest, [cleared...]], ...]` (room-local cell, planner chest indices).
+fn triggers_json(ts: &[Trigger]) -> J {
+    J::A(
+        ts.iter()
+            .map(|t| {
+                J::A(vec![
+                    J::I(t.cell.x as i64),
+                    J::I(t.cell.y as i64),
+                    J::I(t.cell.z as i64),
+                    J::I(t.chest as i64),
+                    J::A(t.cleared.iter().map(|c| J::I(*c as i64)).collect()),
+                ])
+            })
+            .collect(),
+    )
+}
+
 /// The compact room-local plan the JNI `plan` call returns.
 pub fn plan_json(plan: &Plan) -> J {
     let lanes: Vec<J> = plan
@@ -252,6 +269,8 @@ pub fn plan_json(plan: &Plan) -> J {
                 ("tStart", J::D(e.t_start)),
                 ("nTrig", J::I((e.triggers.len() + e.trans_triggers.len()) as i64)),
                 ("tPen", J::D(e.t_pen)),
+                ("trig", triggers_json(&e.triggers)),
+                ("transTrig", triggers_json(&e.trans_triggers)),
             ])
         })
         .collect();
@@ -276,6 +295,7 @@ pub fn plan_json(plan: &Plan) -> J {
         ("yieldTotal", J::I(plan.yield_total as i64)),
         ("cover", J::D(plan.cover)),
         ("nCorridors", J::I(plan.n_corridors as i64)),
+        ("exitTrig", triggers_json(&plan.exit_triggers)),
     ])
 }
 

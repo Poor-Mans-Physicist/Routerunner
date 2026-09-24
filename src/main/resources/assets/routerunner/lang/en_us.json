@@ -1,4 +1,5 @@
 {
   "key.categories.routerunner": "Routerunner",
-  "key.routerunner.open_menu": "Open Routerunner Menu"
+  "key.routerunner.open_menu": "Open Routerunner Menu",
+  "key.routerunner.toggle_time_model": "Switch Time Model (Learned / Simple)"
 }

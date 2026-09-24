@@ -84,13 +84,13 @@ pub extern "system" fn Java_com_routerunner_lane_NativeLane_create(
         mean.copy_from_slice(&mv[0..12]);
         scale.copy_from_slice(&mv[12..24]);
         coef.copy_from_slice(&mv[24..36]);
-        let lm = LegTimeModel {
-            mean,
-            scale,
-            coef,
-            intercept: mv[36],
-            sigma: if mv.len() > 37 { mv[37] } else { 0.0 },
-        };
+        let mut lm = LegTimeModel::ridge(mean, scale, coef, mv[36], if mv.len() > 37 { mv[37] } else { 0.0 });
+        if mv.len() > 41 && mv[38] != 0.0 {
+            lm.linear = true;
+            lm.lin_walk = mv[39];
+            lm.lin_climb = mv[40];
+            lm.lin_drop = mv[41];
+        }
         let boot = Params { point_mode: true, ..Params::default() };
         let p = Planner::new(g, pts, chain_range, chain_limit, boot, lm);
         Some(Box::into_raw(Box::new(p)) as jlong)

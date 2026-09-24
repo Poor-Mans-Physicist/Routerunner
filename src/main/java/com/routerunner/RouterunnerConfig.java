@@ -63,6 +63,12 @@ public class RouterunnerConfig {
 
     /** Learn this player's pace, per-burst cost and leg timing while they play (config/routerunner/adaptive/); off = the bundled model. */
     public boolean adaptiveLearning = true;
+    /**
+     * Which time model the lane planner prices routes with: {@code learned} (the ridge leg model with the adaptive
+     * pace and per-burst cost) or {@code simple} (the linear model fitted on drawn routes, fixed, see
+     * {@code LegTimeModel.simple()}). Rooms planned with {@code simple} are not fed to the adaptive pace calibration.
+     */
+    public String timeModel = "learned";
     /** Delete the oldest run logs once the runs folder is over {@link #runLogCapMB}. */
     public boolean runLogCap = true;
     public int runLogCapMB = 500;
@@ -83,6 +89,12 @@ public class RouterunnerConfig {
             hud.computeIfAbsent(id, i -> new ElementConfig(i.defaultVisible, i.defaultX, i.defaultY));
         }
         if (routingSkipList == null) routingSkipList = new ArrayList<>(List.of("labyrinth"));
+        if (!"simple".equals(timeModel)) timeModel = "learned";
+    }
+
+    /** True when the lane planner should price routes with the simplified time model. */
+    public boolean simpleTimeModel() {
+        return "simple".equals(timeModel);
     }
 
     public ElementConfig element(HudElementId id) {

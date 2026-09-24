@@ -42,7 +42,7 @@ import java.util.stream.Stream;
 public final class RunLog {
     private static final Logger LOG = LogUtils.getLogger();
     /** Run-log format version, stamped on vault_enter. */
-    public static final int LOG_VERSION = 22;
+    public static final int LOG_VERSION = 23;
     private static final SimpleDateFormat FILE_FMT = new SimpleDateFormat("yyyyMMdd_HHmmss");
     /** Maximum events buffered before the vault id resolves. */
     private static final int BUFFER_CAP = 3000;
@@ -344,9 +344,44 @@ public final class RunLog {
         write(sb.toString(), true);
     }
 
+    /** The lane planner's time model was switched ({@code learned} / {@code simple}), by key or menu. */
+    public static synchronized void timeModel(String model, String source) {
+        StringBuilder sb = head("time_model", 120);
+        sb.append(",\"model\":").append(quote(model))
+          .append(",\"source\":").append(quote(source))
+          .append("}\n");
+        write(sb.toString(), true);
+    }
+
+    /**
+     * A warp (teleport) mapped onto the live route: the run and progress the player was on, the nearest route point
+     * to the take-off and to the landing (index into the concatenated run polylines as logged in {@code lane_plan},
+     * the run it belongs to, and the distance off the route), and the route length between them.
+     */
+    public static synchronized void warp(long cellKeyRaw, int run, int prog, int fromRun, int fromIdx, double fromOff,
+                                         int toRun, int toIdx, double toOff, double routeSkipped, String timeModel) {
+        StringBuilder sb = head("warp", 260);
+        sb.append(",\"cellKey\":").append(quote(cellKey(cellKeyRaw)))
+          .append(",\"run\":").append(run)
+          .append(",\"prog\":").append(prog)
+          .append(",\"fromRun\":").append(fromRun)
+          .append(",\"fromIdx\":").append(fromIdx)
+          .append(",\"fromOff\":").append(r2(fromOff))
+          .append(",\"toRun\":").append(toRun)
+          .append(",\"toIdx\":").append(toIdx)
+          .append(",\"toOff\":").append(r2(toOff))
+          .append(",\"routeSkipped\":").append(r2(routeSkipped))
+          .append(",\"timeModel\":").append(quote(timeModel))
+          .append("}\n");
+        write(sb.toString(), true);
+    }
+
     /**
      * The lane planner finished a room (or replanned it): mode, size, the model's predicted time and every run as a
-     * WORLD polyline with its yield, so the replay and the analysis can reconstruct exactly what was drawn.
+     * WORLD polyline with its yield, so the replay and the analysis can reconstruct exactly what was drawn. Also the
+     * time model that priced it and every planned trigger in firing order ({@code trig}: lane, kind 0 = transition /
+     * 1 = lane / 2 = exit, the ROOM-LOCAL firing cell, the target chest, and the flat local coordinates of every chest it
+     * is planned to clear), so each planned click can be timed against the breaks offline.
      */
     public static synchronized void lanePlan(long cellKeyRaw, String roomId, String mode, String reason, int nLanes,
                                              com.routerunner.lane.LaneRoute lr) {
@@ -366,6 +401,9 @@ public final class RunLog {
               .append(",\"yield\":").append(lr.plan.yieldTotal)
               .append(",\"pace\":").append(r4(lr.planner.P.pace))
               .append(",\"triggerS\":").append(r4(lr.planner.P.triggerS))
+              .append(",\"timeModel\":").append(quote(lr.planner.P.timeModel))
+              .append(",\"turnaround\":[").append(r2(lr.planner.P.turnaroundDeg)).append(',').append(r4(lr.planner.P.turnaroundPenaltyS)).append(']')
+              .append(",\"origin\":[").append(lr.ox).append(',').append(lr.oy).append(',').append(lr.oz).append(']')
               .append(",\"miner\":{\"range\":").append(lr.planner.chainModel().range)
                   .append(",\"limit\":").append(lr.planner.chainModel().limit)
                   .append(",\"compMax\":").append(lr.planner.chainModel().compMax)
@@ -391,11 +429,49 @@ public final class RunLog {
                 }
                 sb.append("]}");
             }
+            sb.append("],\"trig\":[");
+            boolean first = true;
+            for (int li = 0; li < lr.plan.lanes.size(); li++) {
+                com.routerunner.lane.LanePlanner.Lane e = lr.plan.lanes.get(li);
+                if (e.transTriggers != null) {
+                    for (com.routerunner.lane.LanePlanner.Trigger t : e.transTriggers) {
+                        if (!first) sb.append(',');
+                        first = false;
+                        trigger(sb, lr.planner, li, 0, t);
+                    }
+                }
+                if (e.triggers != null) {
+                    for (com.routerunner.lane.LanePlanner.Trigger t : e.triggers) {
+                        if (!first) sb.append(',');
+                        first = false;
+                        trigger(sb, lr.planner, li, 1, t);
+                    }
+                }
+            }
+            for (com.routerunner.lane.LanePlanner.Trigger t : lr.plan.exitTriggers) {
+                if (!first) sb.append(',');
+                first = false;
+                trigger(sb, lr.planner, -1, 2, t);
+            }
             sb.append("]}\n");
             write(sb.toString(), true);
         } catch (RuntimeException e) {
             LOG.error("[Routerunner] failed to log the lane plan for {}; this room has no lane_plan record.", roomId, e);
         }
+    }
+
+    private static void trigger(StringBuilder sb, com.routerunner.lane.LanePlanner planner, int lane, int kind,
+                                com.routerunner.lane.LanePlanner.Trigger t) {
+        com.routerunner.solver.P c = planner.chestAt(t.chest);
+        sb.append('[').append(lane).append(',').append(kind).append(',')
+          .append(t.cell.x()).append(',').append(t.cell.y()).append(',').append(t.cell.z()).append(',')
+          .append(c.x()).append(',').append(c.y()).append(',').append(c.z()).append(",[");
+        for (int k = 0; k < t.cleared.length; k++) {
+            com.routerunner.solver.P q = planner.chestAt(t.cleared[k]);
+            if (k > 0) sb.append(',');
+            sb.append(q.x()).append(',').append(q.y()).append(',').append(q.z());
+        }
+        sb.append("]]");
     }
 
     /** A lane follow event: {@code done} / {@code off} / {@code advance} / {@code replan} / {@code finished}, with the pointer index. */

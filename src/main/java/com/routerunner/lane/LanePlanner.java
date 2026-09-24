@@ -74,6 +74,13 @@ public final class LanePlanner {
         public double triggerS = 0.3;
         /** Pace factor already folded into the leg model's intercept (record only; the native planner never reads it). */
         public double pace = 1.0;
+        /** Which time model priced this plan: {@code learned}, or the simplified model's name (record only). */
+        public String timeModel = "learned";
+
+        /** True when the plan was priced with the learned (adaptive) model, whose runs may calibrate it. */
+        public boolean learnedTimeModel() {
+            return "learned".equals(timeModel);
+        }
     }
 
     /** One chain firing: where the ghost stood, which chest it hit, what fell. */
@@ -158,6 +165,11 @@ public final class LanePlanner {
     private long exitFieldKey = Long.MIN_VALUE;
     private P exitCell = null;
     private final Map<Long, List<Integer>> chestBuckets = new HashMap<>();
+
+    /** Chest {@code i} of this planner's chest list (room-local). */
+    public P chestAt(int i) {
+        return chests.get(i);
+    }
 
     /** The chain (or, at range 1, vein) model this planner clears chests with. */
     public ChainModel chainModel() {
@@ -264,6 +276,7 @@ public final class LanePlanner {
         boolean exitStraight;
         double tTotal, tExit, bail, opportunity, cover;
         int yieldTotal, nCorridors;
+        com.google.gson.JsonArray exitTrig;
     }
 
     private static final class NativeLaneRec {
@@ -273,6 +286,21 @@ public final class LanePlanner {
         int nTrig;
         int[] end;
         double[] dir;
+        com.google.gson.JsonArray trig, transTrig;
+    }
+
+    /** Native triggers {@code [[x, y, z, chest, [cleared...]], ...]} back to {@link Trigger}s (empty for an older library). */
+    private static List<Trigger> triggerList(com.google.gson.JsonArray arr) {
+        List<Trigger> out = new ArrayList<>(arr == null ? 0 : arr.size());
+        if (arr == null) return out;
+        for (com.google.gson.JsonElement el : arr) {
+            com.google.gson.JsonArray t = el.getAsJsonArray();
+            com.google.gson.JsonArray cl = t.get(4).getAsJsonArray();
+            int[] cleared = new int[cl.size()];
+            for (int i = 0; i < cleared.length; i++) cleared[i] = cl.get(i).getAsInt();
+            out.add(new Trigger(new P(t.get(0).getAsInt(), t.get(1).getAsInt(), t.get(2).getAsInt()), t.get(3).getAsInt(), cleared));
+        }
+        return out;
     }
 
     private static List<P> cellList(List<int[]> pts) {
@@ -318,8 +346,8 @@ public final class LanePlanner {
                 e.tStart = r.tStart;
                 e.nTrig = r.nTrig;
                 e.tPen = r.tPen;
-                e.triggers = new ArrayList<>();
-                e.transTriggers = new ArrayList<>();
+                e.triggers = triggerList(r.trig);
+                e.transTriggers = triggerList(r.transTrig);
                 plan.lanes.add(e);
                 plan.laneT.add(r.tStart);
             }
@@ -335,6 +363,7 @@ public final class LanePlanner {
         plan.yieldTotal = np.yieldTotal;
         plan.cover = np.cover;
         plan.nCorridors = np.nCorridors;
+        plan.exitTriggers = triggerList(np.exitTrig);
         return plan;
     }
 

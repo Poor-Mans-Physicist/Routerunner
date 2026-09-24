@@ -13,7 +13,10 @@ public class ClientSetup {
 
     @SubscribeEvent
     public static void onClientSetup(FMLClientSetupEvent event) {
-        event.enqueueWork(() -> ClientRegistry.registerKeyBinding(KeyBindings.OPEN_MENU));
+        event.enqueueWork(() -> {
+            ClientRegistry.registerKeyBinding(KeyBindings.OPEN_MENU);
+            ClientRegistry.registerKeyBinding(KeyBindings.TOGGLE_TIME_MODEL);
+        });
         OverlayRegistry.registerOverlayTop("Routerunner HUD", RouterunnerHud.INSTANCE);
 
         if (net.minecraftforge.fml.ModList.get().isLoaded("the_vault")) {

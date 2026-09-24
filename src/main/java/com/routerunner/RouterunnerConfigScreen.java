@@ -78,6 +78,14 @@ public class RouterunnerConfigScreen extends Screen {
         this.addRenderableWidget(new Button(rx, y, bw, 20, new TextComponent("View Past Vaults"),
                 b -> this.minecraft.setScreen(new HistoryScreen(this))));
         y += step;
+        this.addRenderableWidget(new Button(rx, y, bw, 20, timeModelLabel(), b -> {
+            RouterunnerConfig cfg = RouterunnerConfig.get();
+            cfg.timeModel = cfg.simpleTimeModel() ? "learned" : "simple";
+            RunLog.timeModel(cfg.timeModel, "menu");
+            b.setMessage(timeModelLabel());
+        }, (b, pose, mx, my) -> this.renderTooltip(pose, new TextComponent(
+                "Learned: the adaptive leg model. Simple: route length, clicks, drops, sharp corners (fixed). Key: ]"), mx, my)));
+        y += step;
         this.addRenderableWidget(new Button(rx, y, bw, 20, new TextComponent("New Lap"), b -> {
             int lap = ClientEvents.newLap();
             b.setMessage(new TextComponent(lap > 0 ? "Lap " + lap + " started ✓" : "New Lap (not in a vault)"));
@@ -141,6 +149,10 @@ public class RouterunnerConfigScreen extends Screen {
 
     private Component adaptiveLabel() {
         return new TextComponent("Adaptive learning: " + (RouterunnerConfig.get().adaptiveLearning ? "On" : "Off"));
+    }
+
+    private Component timeModelLabel() {
+        return new TextComponent("Time model: " + (RouterunnerConfig.get().simpleTimeModel() ? "Simple" : "Learned"));
     }
 
     private Component arrowLabel() {

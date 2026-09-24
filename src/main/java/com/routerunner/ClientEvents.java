@@ -53,6 +53,16 @@ public class ClientEvents {
         while (KeyBindings.OPEN_MENU.consumeClick()) {
             mc.setScreen(new RouterunnerConfigScreen(null));
         }
+        while (KeyBindings.TOGGLE_TIME_MODEL.consumeClick()) {
+            RouterunnerConfig cfg = RouterunnerConfig.get();
+            cfg.timeModel = cfg.simpleTimeModel() ? "learned" : "simple";
+            RouterunnerConfig.save();
+            RunLog.timeModel(cfg.timeModel, "key");
+            if (mc.player != null) {
+                mc.player.displayClientMessage(new net.minecraft.network.chat.TextComponent(
+                        "Routerunner time model: " + (cfg.simpleTimeModel() ? "Simple" : "Learned") + " (from the next room plan)"), true);
+            }
+        }
 
         ClientLevel level = mc.level;
         Player player = mc.player;

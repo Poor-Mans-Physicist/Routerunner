@@ -67,6 +67,43 @@ struct RawModel {
     sigma: f64,
 }
 
+#[derive(Deserialize)]
+struct RawSimple {
+    walk: f64,
+    #[serde(default)]
+    climb: f64,
+    #[serde(default)]
+    drop: f64,
+    #[serde(rename = "triggerS")]
+    trigger_s: f64,
+    #[serde(rename = "cornerDeg")]
+    corner_deg: f64,
+    #[serde(rename = "cornerS")]
+    corner_s: f64,
+}
+
+/// The simplified model's planner charges: seconds per click, and the corner threshold and charge.
+#[derive(Clone, Copy)]
+struct SimpleCharges {
+    trigger_s: f64,
+    corner_deg: f64,
+    corner_s: f64,
+}
+
+/// A ridge model file, or a simplified model file (recognised by its `walk` field) with its charges.
+fn load_any(path: &str) -> Result<(LegTimeModel, Option<SimpleCharges>), String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {}", path, e))?;
+    if let Ok(raw) = serde_json::from_str::<RawSimple>(&text) {
+        let mut m = LegTimeModel::ridge([0.0; 12], [1.0; 12], [0.0; 12], 0.0, 0.0);
+        m.linear = true;
+        m.lin_walk = raw.walk;
+        m.lin_climb = raw.climb;
+        m.lin_drop = raw.drop;
+        return Ok((m, Some(SimpleCharges { trigger_s: raw.trigger_s, corner_deg: raw.corner_deg, corner_s: raw.corner_s })));
+    }
+    load_model(path).map(|m| (m, None))
+}
+
 fn load_model(path: &str) -> Result<LegTimeModel, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {}", path, e))?;
     let raw: RawModel = serde_json::from_str(&text).map_err(|e| format!("{}: {}", path, e))?;
@@ -79,7 +116,7 @@ fn load_model(path: &str) -> Result<LegTimeModel, String> {
     mean.copy_from_slice(&raw.mean);
     scale.copy_from_slice(&raw.scale);
     coef.copy_from_slice(&raw.coef);
-    Ok(LegTimeModel { mean, scale, coef, intercept: raw.intercept, sigma: raw.sigma })
+    Ok(LegTimeModel::ridge(mean, scale, coef, raw.intercept, raw.sigma))
 }
 
 /// Rebuild a grid from the run log's grid object: gzip + base64 BitSet, bit i = byte i/8 bit i%8
@@ -108,7 +145,7 @@ fn decode_grid(g: &GridIn) -> Result<SolidGrid, String> {
     Ok(grid)
 }
 
-fn plan_room(r: &RoomIn, model: &LegTimeModel) -> Result<J, String> {
+fn plan_room(r: &RoomIn, model: &LegTimeModel, simple: Option<SimpleCharges>) -> Result<J, String> {
     let grid = decode_grid(&r.grid)?;
     let chests: Vec<P> = r.chests.iter().map(|c| P::new(c[0], c[1], c[2])).collect();
     let entrance = snap_inside(&grid, P::new(r.entrance[0], r.entrance[1], r.entrance[2]));
@@ -118,6 +155,11 @@ fn plan_room(r: &RoomIn, model: &LegTimeModel) -> Result<J, String> {
     for mode in &r.modes {
         let t0 = Instant::now();
         let mut p = Params { point_mode: mode == "point", ..Default::default() };
+        if let Some(c) = simple {
+            p.trigger_s = c.trigger_s;
+            p.turnaround_deg = c.corner_deg;
+            p.turnaround_penalty_s = c.corner_s;
+        }
         if let Some(m) = &r.params {
             if let Some(v) = m.get("timeScale") {
                 p.time_scale = *v;
@@ -199,10 +241,10 @@ fn leak_mode(m: &str) -> &'static str {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() < 3 {
-        eprintln!("usage: lane_cli rooms.jsonl plans.jsonl legmodel.json [threads]");
+        eprintln!("usage: lane_cli rooms.jsonl plans.jsonl legmodel.json|timemodel_simple.json [threads]");
         std::process::exit(2);
     }
-    let model = match load_model(&args[2]) {
+    let (model, simple) = match load_any(&args[2]) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("[LaneCli] {}", e);
@@ -240,7 +282,7 @@ fn main() {
                 }
                 let result = match serde_json::from_str::<RoomIn>(line)
                     .map_err(|e| e.to_string())
-                    .and_then(|r| plan_room(&r, &model))
+                    .and_then(|r| plan_room(&r, &model, simple))
                 {
                     Ok(j) => j.to_string(),
                     Err(e) => {

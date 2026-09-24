@@ -7,9 +7,15 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 
 /**
- * The tier-one learned leg-time model: a ridge regression on log(seconds) over twelve planner-computable
- * geometry features, standardised. Coefficients come from {@code research/legmodel_ridge.json} (fitted by
- * {@code tools/legmodel.py}); the feature order and transforms match {@code tools/lanes.py LegTimeModel.vec}.
+ * The leg-time model. Two forms share one call signature:
+ * <ul>
+ *   <li>the tier-one learned ridge regression on log(seconds) over twelve planner-computable geometry features,
+ *   standardised; coefficients from {@code research/legmodel_ridge.json} (fitted by {@code tools/legmodel.py}), feature
+ *   order and transforms as in {@code tools/lanes.py LegTimeModel.vec};</li>
+ *   <li>the simplified linear model ({@link #simple()}): seconds = walk x path length + climb x climbed + drop x
+ *   dropped, fitted on drawn routes against real room times. Its per-click and corner charges ride on the planner's
+ *   {@code triggerS} and turnaround parameters, see {@link Simple}.</li>
+ * </ul>
  */
 public final class LegTimeModel {
     public final double[] mean;
@@ -19,24 +25,41 @@ public final class LegTimeModel {
     public final double sigma;
     /** Between-vault standard deviation of each coefficient (zeros when the JSON has none): the adaptive clamp width. */
     public final double[] spread;
+    /** True for the simplified linear form; the ridge fields are then inert (zero coefficients, unit scale). */
+    public final boolean linear;
+    /** Linear form: seconds per block of path, per block climbed and per block dropped. */
+    public final double linWalk, linClimb, linDrop;
 
     private LegTimeModel(double[] mean, double[] scale, double[] coef, double intercept, double sigma,
                          double[] spread) {
+        this(mean, scale, coef, intercept, sigma, spread, false, 0, 0, 0);
+    }
+
+    private LegTimeModel(double[] mean, double[] scale, double[] coef, double intercept, double sigma,
+                         double[] spread, boolean linear, double linWalk, double linClimb, double linDrop) {
         this.mean = mean;
         this.scale = scale;
         this.coef = coef;
         this.intercept = intercept;
         this.sigma = sigma;
         this.spread = spread == null || spread.length != 12 ? new double[12] : spread;
+        this.linear = linear;
+        this.linWalk = linWalk;
+        this.linClimb = linClimb;
+        this.linDrop = linDrop;
     }
 
     /** The same standardisation with other coefficients (an adapted fit), or a pace factor folded into the intercept. */
     public LegTimeModel with(double[] newCoef, double newIntercept) {
+        if (linear) return this;
         return new LegTimeModel(mean, scale, newCoef.clone(), newIntercept, sigma, spread);
     }
 
     /** Every leg time multiplied by {@code pace}. */
     public LegTimeModel scaled(double pace) {
+        if (linear) {
+            return new LegTimeModel(mean, scale, coef, intercept, sigma, spread, true, linWalk * pace, linClimb * pace, linDrop * pace);
+        }
         return with(coef, intercept + Math.log(pace));
     }
 
@@ -45,6 +68,7 @@ public final class LegTimeModel {
         StringBuilder sb = new StringBuilder();
         for (double[] a : new double[][]{mean, scale, coef}) for (double v : a) sb.append(String.format(java.util.Locale.ROOT, "%.6f,", v));
         sb.append(String.format(java.util.Locale.ROOT, "%.6f", intercept));
+        if (linear) sb.append(String.format(java.util.Locale.ROOT, ",linear,%.6f,%.6f,%.6f", linWalk, linClimb, linDrop));
         return Integer.toHexString(sb.toString().hashCode());
     }
 
@@ -94,6 +118,10 @@ public final class LegTimeModel {
     /** Seconds for one leg from raw (untransformed) features. */
     public double seconds(double straight, double ratio, double climb, double drop, double clrMin, double clrMean,
                           double tightFrac, double turnDeg, double densLine, double densDst, double prevBurst, double warp) {
+        if (linear) {
+            double walk = Math.max(straight, 0.5) * Math.max(ratio, 1.0);
+            return linWalk * walk + linClimb * climb + linDrop * drop;
+        }
         double[] f = features(straight, ratio, climb, drop, clrMin, clrMean, tightFrac, turnDeg, densLine, densDst, prevBurst, warp);
         double s = intercept;
         for (int i = 0; i < 12; i++) s += coef[i] * (f[i] - mean[i]) / scale[i];
@@ -120,6 +148,69 @@ public final class LegTimeModel {
         double s = intercept;
         for (int i = 0; i < 12; i++) s += coef[i] * z[i];
         return s;
+    }
+
+    /**
+     * The simplified time model and the planner charges that go with it: {@link #triggerS} per planned click, and
+     * {@link #cornerS} for a junction turn of at least {@link #cornerDeg}. The corner charge goes through the planner's
+     * turnaround parameters: full past {@code cornerDeg} at a lane start, ramped in from 60 degrees for a transition's
+     * first turn.
+     */
+    public static final class Simple {
+        public final LegTimeModel model;
+        public final double triggerS, cornerDeg, cornerS;
+        public final String name;
+
+        Simple(LegTimeModel model, double triggerS, double cornerDeg, double cornerS, String name) {
+            this.model = model;
+            this.triggerS = triggerS;
+            this.cornerDeg = cornerDeg;
+            this.cornerS = cornerS;
+            this.name = name;
+        }
+    }
+
+    private static volatile Simple simple;
+
+    /** The simplified time model bundled in the jar ({@code assets/routerunner/timemodel_simple.json}). Cached. */
+    public static Simple simple() {
+        Simple s = simple;
+        if (s != null) return s;
+        try (Reader r = new java.io.InputStreamReader(
+                java.util.Objects.requireNonNull(LegTimeModel.class.getResourceAsStream("/assets/routerunner/timemodel_simple.json"),
+                        "bundled timemodel_simple.json missing"), java.nio.charset.StandardCharsets.UTF_8)) {
+            s = fromRawSimple(new Gson().fromJson(r, RawSimple.class));
+        } catch (Exception e) {
+            throw new IllegalStateException("bundled simplified time model unreadable", e);
+        }
+        simple = s;
+        return s;
+    }
+
+    /** Load a simplified time model from a JSON file (the CLI's {@code --simple} option). */
+    public static Simple loadSimple(Path json) throws java.io.IOException {
+        try (Reader r = Files.newBufferedReader(json)) {
+            RawSimple raw = new Gson().fromJson(r, RawSimple.class);
+            if (raw == null || !(raw.walk > 0)) throw new java.io.IOException("simplified time model at " + json + " has no positive walk cost");
+            return fromRawSimple(raw);
+        }
+    }
+
+    private static Simple fromRawSimple(RawSimple raw) {
+        double[] one = new double[12];
+        java.util.Arrays.fill(one, 1.0);
+        LegTimeModel m = new LegTimeModel(new double[12], one, new double[12], 0.0, 0.0, null, true, raw.walk, raw.climb, raw.drop);
+        return new Simple(m, raw.triggerS, raw.cornerDeg, raw.cornerS, raw.name == null ? "simple" : raw.name);
+    }
+
+    private static final class RawSimple {
+        String name;
+        double walk;
+        double climb;
+        double drop;
+        double triggerS;
+        double cornerDeg;
+        double cornerS;
     }
 
     private static final class Raw {

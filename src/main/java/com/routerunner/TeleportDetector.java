@@ -44,7 +44,7 @@ public final class TeleportDetector {
                     tickTeleport = true;
                     count++;
                     RunLog.teleport(lastX, lastY, lastZ, x, y, z, jump, vel);
-                    RouteService.noteTeleport();
+                    RouteService.noteTeleport(lastX, lastY, lastZ, x, y, z);
                 }
             }
         } catch (RuntimeException e) {

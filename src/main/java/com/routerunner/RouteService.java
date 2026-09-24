@@ -134,11 +134,12 @@ public final class RouteService {
         }
 
         /**
-         * The bail floor in model chests per second. With the adaptive model on, the model is already calibrated to
-         * this player's real seconds, so the realized rate needs no conversion; off, the live ratio converts it.
+         * The bail floor in model chests per second. With the adaptive model on, or the simplified time model (fitted on
+         * real room times), the model is already in this player's real seconds, so the realized rate needs no
+         * conversion; otherwise the live ratio converts it.
          */
         static synchronized double bailFloor(RouterunnerConfig cfg, long activeMs) {
-            double conv = com.routerunner.adaptive.Adaptive.enabled() ? 1.0 : ratio();
+            double conv = com.routerunner.adaptive.Adaptive.enabled() || cfg.simpleTimeModel() ? 1.0 : ratio();
             return Math.max(0.0, cfg.laneBailRateFrac) * rate(activeMs) * conv;
         }
 
@@ -161,7 +162,7 @@ public final class RouteService {
      * Flag a position discontinuity (see {@link TeleportDetector}) on the live room so the next trail sample
      * and the current reach leg are not treated as travel.
      */
-    public static void noteTeleport() {
+    public static void noteTeleport(double fx, double fy, double fz, double tx, double ty, double tz) {
         SolvedRoute sr = current;
         if (sr == null) return;
         sr.tpSinceWp++;
@@ -169,6 +170,47 @@ public final class RouteService {
         synchronized (sr.teleportMs) {
             sr.teleportMs.add(MetricsTracker.get().getActiveMs());
         }
+        com.routerunner.lane.LaneRoute lr = sr.lane;
+        if (lr == null) return;
+        try {
+            java.util.List<net.minecraft.core.BlockPos> route = new java.util.ArrayList<>();
+            java.util.List<Integer> runOf = new java.util.ArrayList<>();
+            for (int ri = 0; ri < lr.runs.size(); ri++) {
+                for (net.minecraft.core.BlockPos p : lr.runs.get(ri).poly) {
+                    route.add(p);
+                    runOf.add(ri);
+                }
+            }
+            if (route.size() < 2) return;
+            double[] cum = new double[route.size()];
+            for (int i = 1; i < route.size(); i++) {
+                net.minecraft.core.BlockPos a = route.get(i - 1), b = route.get(i);
+                cum[i] = cum[i - 1] + Math.sqrt(a.distSqr(b));
+            }
+            int fi = nearestIndex(route, fx, fy, fz), ti = nearestIndex(route, tx, ty, tz);
+            RunLog.warp(sr.cellKey, lr.cur, lr.prog, runOf.get(fi), fi, distTo(route.get(fi), fx, fy, fz),
+                    runOf.get(ti), ti, distTo(route.get(ti), tx, ty, tz), cum[ti] - cum[fi], lr.planner.P.timeModel);
+        } catch (RuntimeException e) {
+            LOG.error("[Routerunner] could not map a warp onto the route in {}; this warp has no warp record.", sr.roomId, e);
+        }
+    }
+
+    private static int nearestIndex(java.util.List<net.minecraft.core.BlockPos> route, double x, double y, double z) {
+        int best = 0;
+        double bd = Double.MAX_VALUE;
+        for (int i = 0; i < route.size(); i++) {
+            double d = distTo(route.get(i), x, y, z);
+            if (d < bd) {
+                bd = d;
+                best = i;
+            }
+        }
+        return best;
+    }
+
+    private static double distTo(net.minecraft.core.BlockPos p, double x, double y, double z) {
+        double dx = p.getX() + 0.5 - x, dy = p.getY() - y, dz = p.getZ() + 0.5 - z;
+        return Math.sqrt(dx * dx + dy * dy + dz * dz);
     }
     public static String debugState() { return lastState; }
 
@@ -689,8 +731,20 @@ public final class RouteService {
             lp.exitWeight = cfg.laneExitWeight;
             lp.bailFloor = RateCal.bailFloor(cfg, MetricsTracker.get().getActiveMs());
             boolean vein = "vein".equals(sr.params.miner);
-            lp.triggerS = com.routerunner.adaptive.Adaptive.triggerS(vein);
-            lp.pace = com.routerunner.adaptive.Adaptive.pace(vein);
+            com.routerunner.lane.LegTimeModel model;
+            if (cfg.simpleTimeModel()) {
+                com.routerunner.lane.LegTimeModel.Simple st = com.routerunner.lane.LegTimeModel.simple();
+                model = st.model;
+                lp.triggerS = st.triggerS;
+                lp.pace = 1.0;
+                lp.turnaroundDeg = st.cornerDeg;
+                lp.turnaroundPenaltyS = st.cornerS;
+                lp.timeModel = st.name;
+            } else {
+                model = com.routerunner.adaptive.Adaptive.planningModel(vein);
+                lp.triggerS = com.routerunner.adaptive.Adaptive.triggerS(vein);
+                lp.pace = com.routerunner.adaptive.Adaptive.pace(vein);
+            }
             lp.useNative = cfg.laneNative;
             if (cfg.laneNative) {
                 com.routerunner.lane.NativeLane.init(net.minecraftforge.fml.loading.FMLPaths.CONFIGDIR.get().resolve("routerunner").resolve("natives"));
@@ -701,7 +755,6 @@ public final class RouteService {
                     else LOG.warn("[Routerunner] native lane planner unavailable ({}); planning lanes in Java.", st);
                 }
             }
-            com.routerunner.lane.LegTimeModel model = com.routerunner.adaptive.Adaptive.planningModel(vein);
             Prune pr = prune(sr, chestsLocal, cfg, lp.triggerS);
             if (pr.kept.isEmpty()) {
                 LOG.info("[Routerunner] every {} chest in {} is in a group under {} (rate {}/s x {} s per break); nothing worth routing ({}).",
@@ -831,9 +884,11 @@ public final class RouteService {
             RunLog.laneEvent(sr.cellKey, "done", lr.cur, lr.runs.size(), lr.lastDone, ahead, lr.prog);
             if (lr.engaged && r != null && !r.exit) {
                 double realized = (now - lr.runStartMs) / 1000.0;
-                if (realized > 0.5 && r.seconds > 0.05) RateCal.observe(r.seconds, realized);
-                com.routerunner.adaptive.Adaptive.onRunDone(r.travelS, lr.planner.P.pace, r.nTrig, r.penaltyS, realized,
-                        RateCal.breaksSince(lr.runStartMs), "vein".equals(sr.params.miner));
+                if (lr.planner.P.learnedTimeModel()) {
+                    if (realized > 0.5 && r.seconds > 0.05) RateCal.observe(r.seconds, realized);
+                    com.routerunner.adaptive.Adaptive.onRunDone(r.travelS, lr.planner.P.pace, r.nTrig, r.penaltyS, realized,
+                            RateCal.breaksSince(lr.runStartMs), "vein".equals(sr.params.miner));
+                }
             }
             lr.advance(player, now);
             com.routerunner.lane.LaneRoute.Run nx = lr.current();

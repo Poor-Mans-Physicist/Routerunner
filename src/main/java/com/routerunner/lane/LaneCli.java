@@ -55,11 +55,13 @@ public final class LaneCli {
 
     public static void main(String[] args) throws Exception {
         if (args.length < 3) {
-            System.err.println("usage: LaneCli rooms.jsonl plans.jsonl legmodel.json [threads]");
+            System.err.println("usage: LaneCli rooms.jsonl plans.jsonl legmodel.json|timemodel_simple.json [threads]");
             System.exit(2);
         }
         Path in = Path.of(args[0]), out = Path.of(args[1]);
-        LegTimeModel model = LegTimeModel.load(Path.of(args[2]));
+        String modelText = Files.readString(Path.of(args[2]), StandardCharsets.UTF_8);
+        LegTimeModel.Simple simple = modelText.contains("walk") ? LegTimeModel.loadSimple(Path.of(args[2])) : null;
+        LegTimeModel model = simple != null ? simple.model : LegTimeModel.load(Path.of(args[2]));
         String nativeDir = System.getenv("ROUTERUNNER_NATIVE_DIR");
         if (nativeDir != null) {
             NativeLane.init(Path.of(nativeDir));
@@ -76,7 +78,7 @@ public final class LaneCli {
                 if (line.isBlank()) return;
                 String result;
                 try {
-                    result = gson.toJson(planRoom(gson.fromJson(line, RoomIn.class), model));
+                    result = gson.toJson(planRoom(gson.fromJson(line, RoomIn.class), model, simple));
                 } catch (Exception ex) {
                     Map<String, Object> err = new LinkedHashMap<>();
                     err.put("error", ex.toString());
@@ -99,7 +101,7 @@ public final class LaneCli {
         System.err.printf("[LaneCli] %d rooms in %.1f s on %d threads%n", done.get(), (System.nanoTime() - t0) / 1e9, threads);
     }
 
-    static Map<String, Object> planRoom(RoomIn r, LegTimeModel model) throws IOException {
+    static Map<String, Object> planRoom(RoomIn r, LegTimeModel model, LegTimeModel.Simple simple) throws IOException {
         SolidGrid grid = decodeGrid(r.grid);
         List<P> chests = new ArrayList<>(r.chests.length);
         for (int[] c : r.chests) chests.add(new P(c[0], c[1], c[2]));
@@ -112,6 +114,12 @@ public final class LaneCli {
             long t0 = System.nanoTime();
             LanePlanner.Params p = new LanePlanner.Params();
             p.pointMode = "point".equals(mode);
+            if (simple != null) {
+                p.triggerS = simple.triggerS;
+                p.turnaroundDeg = simple.cornerDeg;
+                p.turnaroundPenaltyS = simple.cornerS;
+                p.timeModel = simple.name;
+            }
             if (r.params != null) {
                 if (r.params.containsKey("timeScale")) p.timeScale = r.params.get("timeScale");
                 if (r.params.containsKey("bailAggression")) p.bailAggression = r.params.get("bailAggression");
