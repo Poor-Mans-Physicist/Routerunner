@@ -251,11 +251,16 @@ public final class LanePlanner {
     }
 
     private static double[] modelArray(LegTimeModel m) {
-        double[] out = new double[37];
+        double[] out = new double[42];
         System.arraycopy(m.mean, 0, out, 0, 12);
         System.arraycopy(m.scale, 0, out, 12, 12);
         System.arraycopy(m.coef, 0, out, 24, 12);
         out[36] = m.intercept;
+        out[37] = m.sigma;
+        out[38] = m.linear ? 1 : 0;
+        out[39] = m.linWalk;
+        out[40] = m.linClimb;
+        out[41] = m.linDrop;
         return out;
     }
 
