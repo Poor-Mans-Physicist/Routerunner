@@ -55,12 +55,12 @@ public class ClientEvents {
         }
         while (KeyBindings.TOGGLE_TIME_MODEL.consumeClick()) {
             RouterunnerConfig cfg = RouterunnerConfig.get();
-            cfg.timeModel = cfg.simpleTimeModel() ? "learned" : "simple";
+            cfg.timeModel = RouterunnerConfig.nextTimeModel(cfg.timeModel);
             RouterunnerConfig.save();
             RunLog.timeModel(cfg.timeModel, "key");
             if (mc.player != null) {
                 mc.player.displayClientMessage(new net.minecraft.network.chat.TextComponent(
-                        "Routerunner time model: " + (cfg.simpleTimeModel() ? "Simple" : "Learned") + " (from the next room plan)"), true);
+                        "Routerunner time model: " + RouterunnerConfig.timeModelLabel(cfg.timeModel) + " (from the next room plan)"), true);
             }
         }
 

@@ -14,7 +14,7 @@ import java.nio.file.Files;
 public class RouterunnerConfigScreen extends Screen {
     private static final int STEP = 24;
     private static final int LEFT_ROWS = 6;
-    private static final int RIGHT_ROWS = 6;
+    private static final int RIGHT_ROWS = 7;
 
     private final Screen parent;
     private int top;
@@ -80,11 +80,12 @@ public class RouterunnerConfigScreen extends Screen {
         y += step;
         this.addRenderableWidget(new Button(rx, y, bw, 20, timeModelLabel(), b -> {
             RouterunnerConfig cfg = RouterunnerConfig.get();
-            cfg.timeModel = cfg.simpleTimeModel() ? "learned" : "simple";
+            cfg.timeModel = RouterunnerConfig.nextTimeModel(cfg.timeModel);
             RunLog.timeModel(cfg.timeModel, "menu");
             b.setMessage(timeModelLabel());
         }, (b, pose, mx, my) -> this.renderTooltip(pose, new TextComponent(
-                "Learned: the adaptive leg model. Simple: route length, clicks, drops, sharp corners (fixed). Key: ]"), mx, my)));
+                "Learned: the adaptive leg model. Simple: route length, clicks, drops, sharp corners (fixed). "
+                        + "Shape: runs, turns, turnarounds and clicks priced move by move (fixed). Key: ]"), mx, my)));
         y += step;
         this.addRenderableWidget(new Button(rx, y, bw, 20, new TextComponent("New Lap"), b -> {
             int lap = ClientEvents.newLap();
@@ -152,7 +153,7 @@ public class RouterunnerConfigScreen extends Screen {
     }
 
     private Component timeModelLabel() {
-        return new TextComponent("Time model: " + (RouterunnerConfig.get().simpleTimeModel() ? "Simple" : "Learned"));
+        return new TextComponent("Time model: " + RouterunnerConfig.timeModelLabel(RouterunnerConfig.get().timeModel));
     }
 
     private Component arrowLabel() {

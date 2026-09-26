@@ -14,7 +14,10 @@ import java.nio.file.Path;
  *   order and transforms as in {@code tools/lanes.py LegTimeModel.vec};</li>
  *   <li>the simplified linear model ({@link #simple()}): seconds = walk x path length + climb x climbed + drop x
  *   dropped, fitted on drawn routes against real room times. Its per-click and corner charges ride on the planner's
- *   {@code triggerS} and turnaround parameters, see {@link Simple}.</li>
+ *   {@code triggerS} and turnaround parameters, see {@link Simple};</li>
+ *   <li>the shape (move) model ({@link #shape()}): the planner prices every leg move by move from its cells (runs by
+ *   clearance, steps, drops, turns, turnarounds) and every planned click from its geometry, see {@link Shape} and
+ *   {@code LanePlanner.shapeCost}. {@link #shape} then holds the per-miner coefficients.</li>
  * </ul>
  */
 public final class LegTimeModel {
@@ -29,14 +32,29 @@ public final class LegTimeModel {
     public final boolean linear;
     /** Linear form: seconds per block of path, per block climbed and per block dropped. */
     public final double linWalk, linClimb, linDrop;
+    /**
+     * Shape form: {@link Shape#N} coefficients for one miner at one movement speed (null for the other forms), in
+     * seconds, already multiplied by the miner's move-time scale; see the {@code S_*} indices.
+     */
+    public final double[] shape;
+
+    public static final int S_RUN_OPEN = 0, S_RUN_MID = 1, S_RUN_TIGHT = 2, S_UP1 = 3, S_UP_SHAFT = 4, S_DROP_SMALL = 5,
+            S_DROP_BIG = 6, S_T20 = 7, S_T60 = 8, S_T120 = 9, S_TA = 10, S_TURN_CLR = 11, S_TA_CLR = 12, S_CLICK = 13,
+            S_SIDE = 14, S_WIDE = 15, S_BEHIND = 16, S_ABOVE = 17, S_BELOW = 18, S_REACH = 19, S_BURST = 20, S_SIZE = 21,
+            S_ROOM_FIXED = 22;
 
     private LegTimeModel(double[] mean, double[] scale, double[] coef, double intercept, double sigma,
                          double[] spread) {
-        this(mean, scale, coef, intercept, sigma, spread, false, 0, 0, 0);
+        this(mean, scale, coef, intercept, sigma, spread, false, 0, 0, 0, null);
     }
 
     private LegTimeModel(double[] mean, double[] scale, double[] coef, double intercept, double sigma,
                          double[] spread, boolean linear, double linWalk, double linClimb, double linDrop) {
+        this(mean, scale, coef, intercept, sigma, spread, linear, linWalk, linClimb, linDrop, null);
+    }
+
+    private LegTimeModel(double[] mean, double[] scale, double[] coef, double intercept, double sigma,
+                         double[] spread, boolean linear, double linWalk, double linClimb, double linDrop, double[] shape) {
         this.mean = mean;
         this.scale = scale;
         this.coef = coef;
@@ -47,16 +65,18 @@ public final class LegTimeModel {
         this.linWalk = linWalk;
         this.linClimb = linClimb;
         this.linDrop = linDrop;
+        this.shape = shape;
     }
 
     /** The same standardisation with other coefficients (an adapted fit), or a pace factor folded into the intercept. */
     public LegTimeModel with(double[] newCoef, double newIntercept) {
-        if (linear) return this;
+        if (linear || shape != null) return this;
         return new LegTimeModel(mean, scale, newCoef.clone(), newIntercept, sigma, spread);
     }
 
     /** Every leg time multiplied by {@code pace}. */
     public LegTimeModel scaled(double pace) {
+        if (shape != null) return this;
         if (linear) {
             return new LegTimeModel(mean, scale, coef, intercept, sigma, spread, true, linWalk * pace, linClimb * pace, linDrop * pace);
         }
@@ -69,6 +89,7 @@ public final class LegTimeModel {
         for (double[] a : new double[][]{mean, scale, coef}) for (double v : a) sb.append(String.format(java.util.Locale.ROOT, "%.6f,", v));
         sb.append(String.format(java.util.Locale.ROOT, "%.6f", intercept));
         if (linear) sb.append(String.format(java.util.Locale.ROOT, ",linear,%.6f,%.6f,%.6f", linWalk, linClimb, linDrop));
+        if (shape != null) for (double v : shape) sb.append(String.format(java.util.Locale.ROOT, ",s%.6f", v));
         return Integer.toHexString(sb.toString().hashCode());
     }
 
@@ -115,9 +136,19 @@ public final class LegTimeModel {
         }
     }
 
-    /** Seconds for one leg from raw (untransformed) features. */
+    /**
+     * Seconds for one leg from raw (untransformed) features. In the shape form the planner prices legs itself
+     * ({@code LanePlanner.shapeCost}); this is only the summary estimate its exit field and ghost use: the path at the
+     * mid-clearance run cost, one-block steps for the climb, small drops for the first three blocks of a drop and the
+     * fall cost beyond.
+     */
     public double seconds(double straight, double ratio, double climb, double drop, double clrMin, double clrMean,
                           double tightFrac, double turnDeg, double densLine, double densDst, double prevBurst, double warp) {
+        if (shape != null) {
+            double walk = Math.max(straight, 0.5) * Math.max(ratio, 1.0);
+            return shape[S_RUN_MID] * walk + shape[S_UP1] * climb + shape[S_DROP_SMALL] * Math.min(drop, 3.0)
+                    + shape[S_DROP_BIG] * Math.max(drop - 3.0, 0.0);
+        }
         if (linear) {
             double walk = Math.max(straight, 0.5) * Math.max(ratio, 1.0);
             return linWalk * walk + linClimb * climb + linDrop * drop;
@@ -201,6 +232,130 @@ public final class LegTimeModel {
         java.util.Arrays.fill(one, 1.0);
         LegTimeModel m = new LegTimeModel(new double[12], one, new double[12], 0.0, 0.0, null, true, raw.walk, raw.climb, raw.drop);
         return new Simple(m, raw.triggerS, raw.cornerDeg, raw.cornerS, raw.name == null ? "simple" : raw.name);
+    }
+
+    /**
+     * The shape (move) time model, fitted on drawn routes against how long this player took over each stretch
+     * ({@code research/2026-09-26_shape}). Move costs are shared by both miners; click costs, the move-time scale and
+     * the fixed room entry and exit seconds are per miner. Runs scale with {@code vRef / movement speed}.
+     */
+    public static final class Shape {
+        public static final int N = 24;
+        static final String[] MOVE = {"run_open", "run_mid", "run_tight", "up1", "up_shaft", "drop_small", "drop_big",
+                "t20", "t60", "t120", "ta", "turn_clr", "ta_clr"};
+        static final String[] CLICK = {"click", "side", "wide", "behind", "above", "below", "reach", "burst", "size"};
+        public final String name;
+        public final double vRef;
+        final double[] move;
+        final double[][] click;
+        final double[] moveScale, roomEntryS, roomExitS, coverage;
+
+        Shape(String name, double vRef, double[] move, double[][] click, double[] moveScale, double[] roomEntryS,
+              double[] roomExitS, double[] coverage) {
+            this.name = name;
+            this.vRef = vRef;
+            this.move = move;
+            this.click = click;
+            this.moveScale = moveScale;
+            this.roomEntryS = roomEntryS;
+            this.roomExitS = roomExitS;
+            this.coverage = coverage;
+        }
+
+        /**
+         * The planner model for one miner at one movement speed. A speed at or under 0.1 (unknown) plans at the
+         * reference speed, with an error logged.
+         */
+        public LegTimeModel forMiner(boolean vein, double speedAttr) {
+            int m = vein ? 1 : 0;
+            double sp = speedAttr;
+            if (!(sp > 0.1)) {
+                System.getLogger("Routerunner").log(System.Logger.Level.ERROR,
+                        "[Routerunner] shape time model got movement speed " + speedAttr + "; pricing runs at the reference speed " + vRef + ".");
+                sp = vRef;
+            }
+            double[] c = new double[N];
+            for (int i = 0; i < MOVE.length; i++) c[i] = move[i] * moveScale[m];
+            double vs = vRef / sp;
+            c[S_RUN_OPEN] *= vs;
+            c[S_RUN_MID] *= vs;
+            c[S_RUN_TIGHT] *= vs;
+            for (int i = 0; i < CLICK.length; i++) c[S_CLICK + i] = click[m][i] * moveScale[m];
+            c[S_ROOM_FIXED] = roomEntryS[m] + roomExitS[m];
+            double[] one = new double[12];
+            java.util.Arrays.fill(one, 1.0);
+            return new LegTimeModel(new double[12], one, new double[12], 0.0, 0.0, null, false, 0, 0, 0, c);
+        }
+
+        /** Seconds one click on a small (8-chest) group costs this miner: the prune threshold's time per break. */
+        public double clickS(boolean vein) {
+            int m = vein ? 1 : 0;
+            return Math.max(0.0, moveScale[m] * (click[m][0] + click[m][8] * LanePlanner.log1pRound(8)));
+        }
+
+        /** Chests the player collects per chest the plan counts (projections only). */
+        public double coverage(boolean vein) {
+            return coverage[vein ? 1 : 0];
+        }
+    }
+
+    private static volatile Shape shapeModel;
+
+    /** The shape time model bundled in the jar ({@code assets/routerunner/timemodel_shape.json}). Cached. */
+    public static Shape shape() {
+        Shape s = shapeModel;
+        if (s != null) return s;
+        try (Reader r = new java.io.InputStreamReader(
+                java.util.Objects.requireNonNull(LegTimeModel.class.getResourceAsStream("/assets/routerunner/timemodel_shape.json"),
+                        "bundled timemodel_shape.json missing"), java.nio.charset.StandardCharsets.UTF_8)) {
+            s = fromRawShape(new Gson().fromJson(r, RawShape.class), "bundled timemodel_shape.json");
+        } catch (Exception e) {
+            throw new IllegalStateException("bundled shape time model unreadable", e);
+        }
+        shapeModel = s;
+        return s;
+    }
+
+    /** Load a shape time model from a JSON file (the CLIs). */
+    public static Shape loadShape(Path json) throws java.io.IOException {
+        try (Reader r = Files.newBufferedReader(json)) {
+            return fromRawShape(new Gson().fromJson(r, RawShape.class), json.toString());
+        }
+    }
+
+    private static Shape fromRawShape(RawShape raw, String where) throws java.io.IOException {
+        if (raw == null || raw.move == null || raw.miners == null || raw.miners.get("chain") == null || raw.miners.get("vein") == null) {
+            throw new java.io.IOException("shape time model at " + where + " lacks move costs or a chain/vein miner block");
+        }
+        double[] move = new double[Shape.MOVE.length];
+        for (int i = 0; i < move.length; i++) {
+            Double v = raw.move.get(Shape.MOVE[i]);
+            if (v == null) throw new java.io.IOException("shape time model at " + where + " lacks move cost " + Shape.MOVE[i]);
+            move[i] = v;
+        }
+        double[][] click = new double[2][Shape.CLICK.length];
+        double[] scale = new double[2], entry = new double[2], exit = new double[2], cov = new double[2];
+        String[] miners = {"chain", "vein"};
+        for (int m = 0; m < 2; m++) {
+            java.util.Map<String, Double> b = raw.miners.get(miners[m]);
+            for (int i = 0; i < Shape.CLICK.length; i++) {
+                Double v = b.get(Shape.CLICK[i]);
+                if (v == null) throw new java.io.IOException("shape time model at " + where + " lacks " + miners[m] + " click cost " + Shape.CLICK[i]);
+                click[m][i] = v;
+            }
+            scale[m] = b.getOrDefault("moveScale", 1.0);
+            entry[m] = b.getOrDefault("roomEntryS", 0.0);
+            exit[m] = b.getOrDefault("roomExitS", 0.0);
+            cov[m] = b.getOrDefault("coverage", 1.0);
+        }
+        return new Shape(raw.name == null ? "shape" : raw.name, raw.vRef > 0 ? raw.vRef : 0.2828, move, click, scale, entry, exit, cov);
+    }
+
+    private static final class RawShape {
+        String name;
+        double vRef;
+        java.util.Map<String, Double> move;
+        java.util.Map<String, java.util.Map<String, Double>> miners;
     }
 
     private static final class RawSimple {

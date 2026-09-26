@@ -10,11 +10,18 @@ use std::rc::Rc;
 
 use crate::chain::{floor_div, Buckets, ChainModel, ChainScratch};
 use crate::grid::{
-    self, astar, bit, dist, flight, hypot2, los_clear, search, standable, standable_p, walk_length,
+    self, astar, bit, dist, flight, hdist, hypot2, los_clear, search, standable, standable_p, walk_length,
     FlightScratch, Scratch, SolidGrid, DISCOUNT_FLOOR, P,
 };
 use crate::jcompat::{dcmp, java_hashmap_order, jround};
-use crate::model::LegTimeModel;
+use crate::model::{
+    LegTimeModel, S_ABOVE, S_BEHIND, S_BELOW, S_BURST, S_CLICK, S_DROP_BIG, S_DROP_SMALL, S_REACH, S_ROOM_FIXED,
+    S_RUN_MID, S_RUN_OPEN, S_RUN_TIGHT, S_SIDE, S_SIZE, S_T120, S_T20, S_T60, S_TA, S_TA_CLR, S_TURN_CLR, S_UP1,
+    S_UP_SHAFT, S_WIDE,
+};
+
+/// "No click yet" for the shape model's burst distance.
+pub const SHAPE_NO_TRIG: f64 = 1e9;
 
 #[derive(Clone)]
 pub struct Params {
@@ -122,6 +129,9 @@ pub struct Lane {
     pub t_start: f64,
     pub run: usize,
     pub t_pen: f64,
+    /// Shape model: the route's last cells before `end` (up to five) and the blocks walked since the last click.
+    pub end_back: Vec<P>,
+    pub end_since_trig: f64,
 }
 
 #[derive(Default)]
@@ -148,6 +158,10 @@ struct State {
     pos: P,
     heading: Option<[f64; 2]>,
     prev_burst: i32,
+    /// The route's last cells before `pos`, oldest first (up to five): the shape model's turn window.
+    back: Vec<P>,
+    /// Horizontal blocks walked since the last planned click (`SHAPE_NO_TRIG` before the first).
+    since_trig: f64,
 }
 
 #[derive(Clone)]
@@ -997,6 +1011,9 @@ fn evaluate(
         hdir(pos, start)
     };
     let align = angle2(tail, d0);
+    if r.model.shape.is_some() {
+        return evaluate_shape(r, c, st, cells, path, remaining, fly_penalty, d0, tail, align);
+    }
     let mut t_trans = if dist(pos, start) > 0.75 {
         leg_time(r, pos, start, Some(&path), &remaining, st.prev_burst, turn_in)
     } else {
@@ -1062,6 +1079,8 @@ fn evaluate(
         t_start: 0.0,
         run: 0,
         t_pen: penalty,
+        end_back: Vec::new(),
+        end_since_trig: SHAPE_NO_TRIG,
     })
 }
 
@@ -1119,6 +1138,312 @@ fn eval_top(r: &Room, c: &mut Cache, st: &State, remaining: &[bool], bail: f64, 
     evals
 }
 
+// ---- the shape (move) model: a leg priced move by move from its cells ----
+
+/// `evaluate` for the shape model: the same path, sweeps and yields, with the transition and lane
+/// priced by `shape_cost`. Junction turns and turnarounds are priced as moves, so only the flight
+/// penalty stays fixed. Mirrors `LanePlanner.evaluateShape`.
+#[allow(clippy::too_many_arguments)]
+fn evaluate_shape(
+    r: &Room,
+    c: &mut Cache,
+    st: &State,
+    cells: Vec<P>,
+    path: Vec<P>,
+    mut remaining: Vec<bool>,
+    fly_penalty: f64,
+    d0: [f64; 2],
+    tail: [f64; 2],
+    align: f64,
+) -> Option<Lane> {
+    let mut trans_triggers: Vec<Trigger> = Vec::new();
+    let y_trans = if path.len() > 1 {
+        sweep(r, c, &path[..path.len() - 1], &mut remaining, &mut trans_triggers)
+    } else {
+        0
+    };
+    let mut triggers: Vec<Trigger> = Vec::new();
+    let y_lane = sweep(r, c, &cells, &mut remaining, &mut triggers);
+    let y_total = y_trans + y_lane;
+    if y_total == 0 {
+        return None;
+    }
+    let mut seq: Vec<P> = Vec::with_capacity(st.back.len() + path.len() + cells.len());
+    seq.extend_from_slice(&st.back);
+    let i0 = seq.len();
+    seq.extend_from_slice(&path);
+    let split = seq.len() - 1;
+    seq.extend_from_slice(&cells[1..]);
+    let mut all: Vec<Trigger> = Vec::with_capacity(trans_triggers.len() + triggers.len());
+    all.extend(trans_triggers.iter().cloned());
+    all.extend(triggers.iter().cloned());
+    let mut idx = vec![0usize; all.len()];
+    let mut in_a = vec![false; all.len()];
+    let mut ptr = i0;
+    for i in 0..trans_triggers.len() {
+        idx[i] = seq_index(&seq, ptr, trans_triggers[i].cell);
+        ptr = idx[i];
+        in_a[i] = true;
+    }
+    ptr = split;
+    for i in trans_triggers.len()..all.len() {
+        idx[i] = seq_index(&seq, ptr, all[i].cell);
+        ptr = idx[i];
+    }
+    let sc = shape_cost(r, &seq, i0, split, &all, &idx, &in_a, st.since_trig);
+    let mut pb = st.prev_burst;
+    for t in &triggers {
+        pb = t.cleared.len() as i32;
+    }
+    let end = cells[cells.len() - 1];
+    let t_trans = sc[0] + fly_penalty;
+    let t_lane = sc[1];
+    let rate = y_total as f64 / (t_trans + t_lane).max(0.05);
+    let d_exit = r.p.exit_weight * (exit_time(r, c, end) - exit_time(r, c, st.pos));
+    let rate_x = exit_aware_rate(y_total, t_trans + t_lane, d_exit);
+    let single = cells.len() == 1;
+    let end_back: Vec<P> = seq[seq.len().saturating_sub(6)..seq.len() - 1].to_vec();
+    Some(Lane {
+        cells,
+        dir: d0,
+        trans: path,
+        yield_: y_total,
+        yield_trans: y_trans,
+        t_trans,
+        t_lane,
+        rate,
+        align,
+        rate_x,
+        d_exit,
+        end,
+        remaining,
+        triggers,
+        trans_triggers,
+        end_heading: if single { tail } else { d0 },
+        end_burst: pb,
+        t_start: 0.0,
+        run: 0,
+        t_pen: fly_penalty,
+        end_back,
+        end_since_trig: sc[2],
+    })
+}
+
+/// First index at or after `from` whose cell is `cell`; `from` (with an error logged) when none is.
+fn seq_index(seq: &[P], from: usize, cell: P) -> usize {
+    for (j, q) in seq.iter().enumerate().skip(from) {
+        if *q == cell {
+            return j;
+        }
+    }
+    eprintln!(
+        "[Routerunner] shape model: planned click cell {},{},{} is not on its leg; pricing it at leg index {}.",
+        cell.x, cell.y, cell.z, from
+    );
+    from
+}
+
+/// Degrees rounded to 1e-6, so Rust and Java agree on every bucket edge despite 1-ulp acos differences.
+#[inline]
+fn round_deg(deg: f64) -> f64 {
+    jround(deg * 1e6) as f64 / 1e6
+}
+
+/// ln(1 + n) rounded to 1e-9, for the same reason.
+#[inline]
+pub fn log1p_round(n: usize) -> f64 {
+    jround((n as f64).ln_1p() * 1e9) as f64 / 1e9
+}
+
+/// Unsigned horizontal angle between two vectors, degrees (rounded); 0 when either is shorter than `min_len`.
+fn h_angle(ax: f64, az: f64, bx: f64, bz: f64, min_len: f64) -> f64 {
+    let la = (ax * ax + az * az).sqrt();
+    let lb = (bx * bx + bz * bz).sqrt();
+    if la < min_len || lb < min_len || la < 1e-9 || lb < 1e-9 {
+        return 0.0;
+    }
+    let cc = (ax * bx + az * bz) / (la * lb);
+    round_deg((-1.0f64).max(1.0f64.min(cc)).acos().to_degrees())
+}
+
+/// Shape-model seconds for a stretch of route; see `LanePlanner.shapeCost`, which this mirrors
+/// operation for operation. Returns [A, B, horizontal walk since the last click at the end].
+#[allow(clippy::too_many_arguments)]
+fn shape_cost(r: &Room, seq: &[P], i0: usize, split: usize, trig: &[Trigger], idx: &[usize], in_a: &[bool], since0: f64) -> [f64; 3] {
+    let c = r.model.shape.as_ref().expect("shape_cost needs the shape model");
+    let g = &r.g;
+    let k_n = seq.len();
+    let mut harc = vec![0.0f64; k_n];
+    for j in 1..k_n {
+        harc[j] = harc[j - 1] + hdist(seq[j - 1], seq[j]);
+    }
+    let mut a = 0.0f64;
+    let mut b = 0.0f64;
+    let mut j = i0;
+    while j + 1 < k_n {
+        let p = seq[j];
+        let q = seq[j + 1];
+        let h = harc[j + 1] - harc[j];
+        let cl = std::cmp::min(g.clearance_fly_at(p.x, p.y, p.z), g.clearance_fly_at(q.x, q.y, q.z));
+        let mut s = (if cl >= 3 {
+            c[S_RUN_OPEN]
+        } else if cl == 2 {
+            c[S_RUN_MID]
+        } else {
+            c[S_RUN_TIGHT]
+        }) * h;
+        let dy = q.y - p.y;
+        if dy == 1 {
+            s += c[S_UP1];
+        } else if dy >= 2 {
+            s += c[S_UP_SHAFT] * dy as f64;
+        } else if (-3..=-1).contains(&dy) {
+            s += c[S_DROP_SMALL];
+        } else if dy < -3 {
+            s += c[S_DROP_BIG] * (-dy) as f64;
+        }
+        if j + 1 <= split {
+            a += s;
+        } else {
+            b += s;
+        }
+        j += 1;
+    }
+    let mut cand: Vec<(f64, usize)> = Vec::new();
+    if k_n >= 3 {
+        let from = std::cmp::max(2, i0 as i64 - 1) as usize;
+        let mut k = from;
+        while k + 3 <= k_n {
+            let wi = std::cmp::min(3, k);
+            let wo = std::cmp::min(3, k_n - 1 - k);
+            let pk = seq[k];
+            let pa = seq[k - wi];
+            let pb = seq[k + wo];
+            let ang = h_angle(
+                (pk.x - pa.x) as f64,
+                (pk.z - pa.z) as f64,
+                (pb.x - pk.x) as f64,
+                (pb.z - pk.z) as f64,
+                1.0,
+            );
+            if ang >= 20.0 {
+                cand.push((ang, k));
+            }
+            k += 1;
+        }
+    }
+    cand.sort_by(|u, v| if u.0 != v.0 { dcmp(v.0, u.0) } else { v.1.cmp(&u.1) });
+    let mut taken = vec![false; k_n];
+    let mut turns: Vec<(f64, usize)> = Vec::new();
+    for &(ang, k) in &cand {
+        let lo = k.saturating_sub(3);
+        let hi = std::cmp::min(k_n - 1, k + 3);
+        if (lo..=hi).any(|q| taken[q]) {
+            continue;
+        }
+        taken[k] = true;
+        turns.push((ang, k));
+    }
+    turns.sort_by(|u, v| u.1.cmp(&v.1));
+    for &(ang, k) in &turns {
+        let pk = seq[k];
+        let cl = g.clearance_fly_at(pk.x, pk.y, pk.z);
+        let tt = if cl <= 1 {
+            1.0
+        } else if cl == 2 {
+            0.5
+        } else {
+            0.0
+        };
+        let mut retrace = false;
+        if ang >= 135.0 {
+            let b0 = k.saturating_sub(4);
+            let f1 = std::cmp::min(k_n, k + 4);
+            retrace = k > b0 && f1 > k + 1;
+            let mut f = k + 1;
+            while f < f1 && retrace {
+                let mut close = false;
+                for gi in b0..k {
+                    if hdist(seq[f], seq[gi]) <= 1.5 {
+                        close = true;
+                        break;
+                    }
+                }
+                retrace = close;
+                f += 1;
+            }
+        }
+        let s = if retrace {
+            c[S_TA] + c[S_TA_CLR] * tt
+        } else {
+            (if ang < 60.0 {
+                c[S_T20]
+            } else if ang < 120.0 {
+                c[S_T60]
+            } else {
+                c[S_T120]
+            }) + c[S_TURN_CLR] * (tt * ang / 90.0)
+        };
+        if k <= split {
+            a += s;
+        } else {
+            b += s;
+        }
+    }
+    let mut has_prev = false;
+    let mut prev_arc = 0.0f64;
+    for (i, t) in trig.iter().enumerate() {
+        let k = idx[i];
+        let gap = if has_prev { harc[k] - prev_arc } else { since0 + (harc[k] - harc[i0]) };
+        let cell = seq[k];
+        let back2 = seq[k.saturating_sub(2)];
+        let mut hx = (cell.x - back2.x) as f64;
+        let mut hz = (cell.z - back2.z) as f64;
+        if (hx * hx + hz * hz).sqrt() < 0.5 {
+            let fwd = seq[std::cmp::min(k_n - 1, k + 2)];
+            hx = (fwd.x - cell.x) as f64;
+            hz = (fwd.z - cell.z) as f64;
+        }
+        let ch = r.chests[t.chest as usize];
+        let vx = (ch.x - cell.x) as f64;
+        let vy = (ch.y as f64 + 0.5) - (cell.y as f64 + 1.62);
+        let vz = (ch.z - cell.z) as f64;
+        let ang = h_angle(hx, hz, vx, vz, 0.5);
+        let mut s = c[S_CLICK];
+        if (30.0..75.0).contains(&ang) {
+            s += c[S_SIDE];
+        } else if (75.0..120.0).contains(&ang) {
+            s += c[S_WIDE];
+        } else if ang >= 120.0 {
+            s += c[S_BEHIND];
+        }
+        if vy > 0.5 {
+            s += c[S_ABOVE];
+        } else if vy < -2.5 {
+            s += c[S_BELOW];
+        }
+        s += c[S_REACH] * 0.0f64.max((vx * vx + vy * vy + vz * vz).sqrt() - 3.0);
+        if gap <= 3.0 {
+            s += c[S_BURST];
+        }
+        s += c[S_SIZE] * log1p_round(t.cleared.len());
+        s = 0.0f64.max(s);
+        if in_a[i] {
+            a += s;
+        } else {
+            b += s;
+        }
+        has_prev = true;
+        prev_arc = harc[k];
+    }
+    let since = if has_prev {
+        harc[k_n - 1] - prev_arc
+    } else {
+        since0 + (harc[k_n - 1] - harc[std::cmp::min(i0, k_n - 1)])
+    };
+    [a, b, since]
+}
+
 fn best_lane(r: &Room, c: &mut Cache, st: &State, remaining: &[bool], depth: i32, bail: f64) -> Option<Lane> {
     let k = if depth > 0 {
         r.p.proxy_top_k
@@ -1141,6 +1466,8 @@ fn best_lane(r: &Room, c: &mut Cache, st: &State, remaining: &[bool], depth: i32
             pos: evals[i].end,
             heading: Some(evals[i].end_heading),
             prev_burst: evals[i].end_burst,
+            back: evals[i].end_back.clone(),
+            since_trig: evals[i].end_since_trig,
         };
         let f = {
             let rem = evals[i].remaining.clone();
@@ -1223,7 +1550,7 @@ fn plan_impl(r: &Room, c: &mut Cache, entrance: P, exit: P, remaining_in: Vec<bo
     }
     let live = remaining_in.iter().filter(|b| **b).count() as i32;
     let mut remaining = remaining_in.clone();
-    let mut st = State { pos: entrance, heading: None, prev_burst: 0 };
+    let mut st = State { pos: entrance, heading: None, prev_burst: 0, back: Vec::new(), since_trig: SHAPE_NO_TRIG };
     let mut plan = Plan { n_corridors: r.corridors.len(), ..Default::default() };
     let mut first: Vec<f64> = eval_top(r, c, &st, &remaining, 0.0, r.p.proxy_top_k)
         .iter()
@@ -1258,6 +1585,8 @@ fn plan_impl(r: &Room, c: &mut Cache, entrance: P, exit: P, remaining_in: Vec<bo
             pos: e.end,
             heading: Some(e.end_heading),
             prev_burst: e.end_burst,
+            back: e.end_back.clone(),
+            since_trig: e.end_since_trig,
         };
         plan.lanes.push(e);
     }
@@ -1269,23 +1598,56 @@ fn plan_impl(r: &Room, c: &mut Cache, entrance: P, exit: P, remaining_in: Vec<bo
             plan.exit_straight = true;
         }
     }
-    let mut t_exit = match &exit_path {
-        Some(p) => leg_time(r, st.pos, exit, Some(p), &remaining, st.prev_burst, 0.0),
-        None => 0.0,
-    };
-    if let Some(p) = &exit_path {
-        if p.len() > 1 {
-            let tailcells: Vec<P> = p[1..].to_vec();
-            let mut trg: Vec<Trigger> = Vec::new();
-            let y = sweep(r, c, &tailcells, &mut remaining, &mut trg);
-            t_exit += r.p.trigger_s * trg.len() as f64;
-            plan.yield_total += y;
-            plan.exit_triggers = trg;
+    let mut t_exit;
+    if r.model.shape.is_none() {
+        t_exit = match &exit_path {
+            Some(p) => leg_time(r, st.pos, exit, Some(p), &remaining, st.prev_burst, 0.0),
+            None => 0.0,
+        };
+        if let Some(p) = &exit_path {
+            if p.len() > 1 {
+                let tailcells: Vec<P> = p[1..].to_vec();
+                let mut trg: Vec<Trigger> = Vec::new();
+                let y = sweep(r, c, &tailcells, &mut remaining, &mut trg);
+                t_exit += r.p.trigger_s * trg.len() as f64;
+                plan.yield_total += y;
+                plan.exit_triggers = trg;
+            }
+        }
+    } else {
+        t_exit = 0.0;
+        if let Some(p) = &exit_path {
+            if p.len() > 1 {
+                let tailcells: Vec<P> = p[1..].to_vec();
+                let mut trg: Vec<Trigger> = Vec::new();
+                let y = sweep(r, c, &tailcells, &mut remaining, &mut trg);
+                plan.yield_total += y;
+                plan.exit_triggers = trg;
+            }
+            let mut seq: Vec<P> = Vec::with_capacity(st.back.len() + p.len());
+            seq.extend_from_slice(&st.back);
+            let i0 = seq.len();
+            seq.extend_from_slice(p);
+            let n = plan.exit_triggers.len();
+            let mut idx = vec![0usize; n];
+            let in_a = vec![true; n];
+            let mut ptr = std::cmp::min(i0 + 1, seq.len() - 1);
+            for i in 0..n {
+                idx[i] = seq_index(&seq, ptr, plan.exit_triggers[i].cell);
+                ptr = idx[i];
+            }
+            let split = seq.len() - 1;
+            let sc = shape_cost(r, &seq, i0, split, &plan.exit_triggers, &idx, &in_a, st.since_trig);
+            t_exit = sc[0] + sc[1];
         }
     }
     plan.exit_path = exit_path;
     plan.t_exit = t_exit;
-    plan.t_total = t + t_exit;
+    let fixed = match &r.model.shape {
+        Some(cf) => cf[S_ROOM_FIXED],
+        None => 0.0,
+    };
+    plan.t_total = t + t_exit + fixed;
     plan.cover = if live == 0 {
         0.0
     } else {

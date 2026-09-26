@@ -134,12 +134,12 @@ public final class RouteService {
         }
 
         /**
-         * The bail floor in model chests per second. With the adaptive model on, or the simplified time model (fitted on
-         * real room times), the model is already in this player's real seconds, so the realized rate needs no
-         * conversion; otherwise the live ratio converts it.
+         * The bail floor in model chests per second. With the adaptive model on, or the simplified or shape time model
+         * (both fitted on real room times), the model is already in this player's real seconds, so the realized rate
+         * needs no conversion; otherwise the live ratio converts it.
          */
         static synchronized double bailFloor(RouterunnerConfig cfg, long activeMs) {
-            double conv = com.routerunner.adaptive.Adaptive.enabled() || cfg.simpleTimeModel() ? 1.0 : ratio();
+            double conv = com.routerunner.adaptive.Adaptive.enabled() || cfg.simpleTimeModel() || cfg.shapeTimeModel() ? 1.0 : ratio();
             return Math.max(0.0, cfg.laneBailRateFrac) * rate(activeMs) * conv;
         }
 
@@ -740,6 +740,13 @@ public final class RouteService {
                 lp.turnaroundDeg = st.cornerDeg;
                 lp.turnaroundPenaltyS = st.cornerS;
                 lp.timeModel = st.name;
+            } else if (cfg.shapeTimeModel()) {
+                com.routerunner.lane.LegTimeModel.Shape sh = com.routerunner.lane.LegTimeModel.shape();
+                model = sh.forMiner(vein, sr.params.speedAttr);
+                lp.triggerS = sh.clickS(vein);
+                lp.pace = 1.0;
+                lp.turnaroundPenaltyS = 0.0;
+                lp.timeModel = sh.name;
             } else {
                 model = com.routerunner.adaptive.Adaptive.planningModel(vein);
                 lp.triggerS = com.routerunner.adaptive.Adaptive.triggerS(vein);

@@ -65,8 +65,10 @@ public class RouterunnerConfig {
     public boolean adaptiveLearning = true;
     /**
      * Which time model the lane planner prices routes with: {@code learned} (the ridge leg model with the adaptive
-     * pace and per-burst cost) or {@code simple} (the linear model fitted on drawn routes, fixed, see
-     * {@code LegTimeModel.simple()}). Rooms planned with {@code simple} are not fed to the adaptive pace calibration.
+     * pace and per-burst cost), {@code simple} (the linear model fitted on drawn routes, fixed, see
+     * {@code LegTimeModel.simple()}) or {@code shape} (the move model: runs, turns, turnarounds and clicks priced from
+     * the route's cells, fixed, see {@code LegTimeModel.shape()}). Only {@code learned} rooms feed the adaptive pace
+     * calibration.
      */
     public String timeModel = "learned";
     /** Delete the oldest run logs once the runs folder is over {@link #runLogCapMB}. */
@@ -89,12 +91,35 @@ public class RouterunnerConfig {
             hud.computeIfAbsent(id, i -> new ElementConfig(i.defaultVisible, i.defaultX, i.defaultY));
         }
         if (routingSkipList == null) routingSkipList = new ArrayList<>(List.of("labyrinth"));
-        if (!"simple".equals(timeModel)) timeModel = "learned";
+        if (!"simple".equals(timeModel) && !"shape".equals(timeModel)) timeModel = "learned";
     }
 
     /** True when the lane planner should price routes with the simplified time model. */
     public boolean simpleTimeModel() {
         return "simple".equals(timeModel);
+    }
+
+    /** True when the lane planner should price routes with the shape (move) time model. */
+    public boolean shapeTimeModel() {
+        return "shape".equals(timeModel);
+    }
+
+    /** The next time model in the switch order learned, simple, shape. */
+    public static String nextTimeModel(String cur) {
+        return switch (cur) {
+            case "learned" -> "simple";
+            case "simple" -> "shape";
+            default -> "learned";
+        };
+    }
+
+    /** The label a time model shows in the menu and on the switch message. */
+    public static String timeModelLabel(String m) {
+        return switch (m) {
+            case "simple" -> "Simple";
+            case "shape" -> "Shape";
+            default -> "Learned";
+        };
     }
 
     public ElementConfig element(HudElementId id) {

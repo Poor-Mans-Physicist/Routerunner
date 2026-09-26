@@ -55,13 +55,14 @@ public final class LaneCli {
 
     public static void main(String[] args) throws Exception {
         if (args.length < 3) {
-            System.err.println("usage: LaneCli rooms.jsonl plans.jsonl legmodel.json|timemodel_simple.json [threads]");
+            System.err.println("usage: LaneCli rooms.jsonl plans.jsonl legmodel.json|timemodel_simple.json|timemodel_shape.json [threads]");
             System.exit(2);
         }
         Path in = Path.of(args[0]), out = Path.of(args[1]);
         String modelText = Files.readString(Path.of(args[2]), StandardCharsets.UTF_8);
-        LegTimeModel.Simple simple = modelText.contains("walk") ? LegTimeModel.loadSimple(Path.of(args[2])) : null;
-        LegTimeModel model = simple != null ? simple.model : LegTimeModel.load(Path.of(args[2]));
+        LegTimeModel.Shape shape = modelText.contains("\"miners\"") ? LegTimeModel.loadShape(Path.of(args[2])) : null;
+        LegTimeModel.Simple simple = shape == null && modelText.contains("walk") ? LegTimeModel.loadSimple(Path.of(args[2])) : null;
+        LegTimeModel model = shape != null ? null : simple != null ? simple.model : LegTimeModel.load(Path.of(args[2]));
         String nativeDir = System.getenv("ROUTERUNNER_NATIVE_DIR");
         if (nativeDir != null) {
             NativeLane.init(Path.of(nativeDir));
@@ -78,7 +79,7 @@ public final class LaneCli {
                 if (line.isBlank()) return;
                 String result;
                 try {
-                    result = gson.toJson(planRoom(gson.fromJson(line, RoomIn.class), model, simple));
+                    result = gson.toJson(planRoom(gson.fromJson(line, RoomIn.class), model, simple, shape));
                 } catch (Exception ex) {
                     Map<String, Object> err = new LinkedHashMap<>();
                     err.put("error", ex.toString());
@@ -101,7 +102,11 @@ public final class LaneCli {
         System.err.printf("[LaneCli] %d rooms in %.1f s on %d threads%n", done.get(), (System.nanoTime() - t0) / 1e9, threads);
     }
 
-    static Map<String, Object> planRoom(RoomIn r, LegTimeModel model, LegTimeModel.Simple simple) throws IOException {
+    static Map<String, Object> planRoom(RoomIn r, LegTimeModel model, LegTimeModel.Simple simple, LegTimeModel.Shape shape) throws IOException {
+        if (shape != null) {
+            double speed = r.params != null && r.params.containsKey("speedAttr") ? r.params.get("speedAttr") : 0.0;
+            model = shape.forMiner(r.chainRange == 1, speed > 0.1 ? speed : shape.vRef);
+        }
         SolidGrid grid = decodeGrid(r.grid);
         List<P> chests = new ArrayList<>(r.chests.length);
         for (int[] c : r.chests) chests.add(new P(c[0], c[1], c[2]));
@@ -120,6 +125,11 @@ public final class LaneCli {
                 p.turnaroundPenaltyS = simple.cornerS;
                 p.timeModel = simple.name;
             }
+            if (shape != null) {
+                p.triggerS = shape.clickS(r.chainRange == 1);
+                p.turnaroundPenaltyS = 0.0;
+                p.timeModel = shape.name;
+            }
             if (r.params != null) {
                 if (r.params.containsKey("timeScale")) p.timeScale = r.params.get("timeScale");
                 if (r.params.containsKey("bailAggression")) p.bailAggression = r.params.get("bailAggression");
@@ -130,6 +140,8 @@ public final class LaneCli {
                 if (r.params.containsKey("minLaneClr")) p.minLaneClr = r.params.get("minLaneClr").intValue();
                 if (r.params.containsKey("turnCap")) p.turnCap = r.params.get("turnCap");
                 if (r.params.containsKey("breakReach")) p.breakReach = r.params.get("breakReach");
+                if (r.params.containsKey("bailFloor")) p.bailFloor = r.params.get("bailFloor");
+                if (r.params.containsKey("triggerS")) p.triggerS = r.params.get("triggerS");
             }
             LanePlanner planner = new LanePlanner(grid, chests, r.chainRange, r.chainLimit, p, model);
             LanePlanner.Plan plan = planner.plan(entrance, exit);

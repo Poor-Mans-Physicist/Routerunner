@@ -13,6 +13,7 @@ use serde::Deserialize;
 use routerunner_lane::export::{export, o, J};
 use routerunner_lane::grid::{snap_inside, SolidGrid, P};
 use routerunner_lane::jcompat::{jformat_f, pad_left, pad_right, treeify_hits};
+use routerunner_lane::model;
 use routerunner_lane::model::LegTimeModel;
 use routerunner_lane::planner::{Params, Planner};
 
@@ -90,18 +91,62 @@ struct SimpleCharges {
     corner_s: f64,
 }
 
-/// A ridge model file, or a simplified model file (recognised by its `walk` field) with its charges.
-fn load_any(path: &str) -> Result<(LegTimeModel, Option<SimpleCharges>), String> {
+#[derive(Deserialize, Clone)]
+struct RawShape {
+    #[serde(rename = "vRef", default)]
+    v_ref: f64,
+    #[serde(rename = "move")]
+    moves: HashMap<String, f64>,
+    miners: HashMap<String, HashMap<String, f64>>,
+}
+
+const SHAPE_MOVE: [&str; 13] =
+    ["run_open", "run_mid", "run_tight", "up1", "up_shaft", "drop_small", "drop_big", "t20", "t60", "t120", "ta", "turn_clr", "ta_clr"];
+const SHAPE_CLICK: [&str; 9] = ["click", "side", "wide", "behind", "above", "below", "reach", "burst", "size"];
+
+/// The shape model for one miner at one speed: the same arithmetic, in the same order, as
+/// `LegTimeModel.Shape.forMiner`. Also returns the per-click seconds the planner's ghost uses
+/// (`Shape.clickS`).
+fn shape_for(raw: &RawShape, vein: bool, speed: f64) -> Result<(LegTimeModel, f64), String> {
+    let b = raw.miners.get(if vein { "vein" } else { "chain" }).ok_or("shape model lacks a chain/vein block")?;
+    let v_ref = if raw.v_ref > 0.0 { raw.v_ref } else { 0.2828 };
+    let sp = if speed > 0.1 { speed } else { v_ref };
+    let scale = *b.get("moveScale").unwrap_or(&1.0);
+    let mut c = vec![0f64; model::SHAPE_N];
+    for (i, k) in SHAPE_MOVE.iter().enumerate() {
+        c[i] = *raw.moves.get(*k).ok_or(format!("shape model lacks move cost {}", k))? * scale;
+    }
+    let vs = v_ref / sp;
+    c[model::S_RUN_OPEN] *= vs;
+    c[model::S_RUN_MID] *= vs;
+    c[model::S_RUN_TIGHT] *= vs;
+    for (i, k) in SHAPE_CLICK.iter().enumerate() {
+        c[model::S_CLICK + i] = *b.get(*k).ok_or(format!("shape model lacks click cost {}", k))? * scale;
+    }
+    c[model::S_ROOM_FIXED] = *b.get("roomEntryS").unwrap_or(&0.0) + *b.get("roomExitS").unwrap_or(&0.0);
+    let click_s = 0.0f64.max(scale * (b["click"] + b["size"] * routerunner_lane::planner::log1p_round(8)));
+    let mut m = LegTimeModel::ridge([0.0; 12], [1.0; 12], [0.0; 12], 0.0, 0.0);
+    m.shape = Some(c);
+    Ok((m, click_s))
+}
+
+/// A ridge model file, a simplified model file (recognised by its `walk` field) with its charges,
+/// or a shape model file (recognised by its `miners` block; built per room in `plan_room`).
+fn load_any(path: &str) -> Result<(LegTimeModel, Option<SimpleCharges>, Option<RawShape>), String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {}", path, e))?;
+    if let Ok(raw) = serde_json::from_str::<RawShape>(&text) {
+        let m = LegTimeModel::ridge([0.0; 12], [1.0; 12], [0.0; 12], 0.0, 0.0);
+        return Ok((m, None, Some(raw)));
+    }
     if let Ok(raw) = serde_json::from_str::<RawSimple>(&text) {
         let mut m = LegTimeModel::ridge([0.0; 12], [1.0; 12], [0.0; 12], 0.0, 0.0);
         m.linear = true;
         m.lin_walk = raw.walk;
         m.lin_climb = raw.climb;
         m.lin_drop = raw.drop;
-        return Ok((m, Some(SimpleCharges { trigger_s: raw.trigger_s, corner_deg: raw.corner_deg, corner_s: raw.corner_s })));
+        return Ok((m, Some(SimpleCharges { trigger_s: raw.trigger_s, corner_deg: raw.corner_deg, corner_s: raw.corner_s }), None));
     }
-    load_model(path).map(|m| (m, None))
+    load_model(path).map(|m| (m, None, None))
 }
 
 fn load_model(path: &str) -> Result<LegTimeModel, String> {
@@ -145,7 +190,16 @@ fn decode_grid(g: &GridIn) -> Result<SolidGrid, String> {
     Ok(grid)
 }
 
-fn plan_room(r: &RoomIn, model: &LegTimeModel, simple: Option<SimpleCharges>) -> Result<J, String> {
+fn plan_room(r: &RoomIn, model_in: &LegTimeModel, simple: Option<SimpleCharges>, shape: Option<&RawShape>) -> Result<J, String> {
+    let mut model = model_in.clone();
+    let mut shape_click = None;
+    if let Some(raw) = shape {
+        let speed = r.params.as_ref().and_then(|m| m.get("speedAttr").copied()).unwrap_or(0.0);
+        let (m, cs) = shape_for(raw, r.chain_range == 1, speed)?;
+        model = m;
+        shape_click = Some(cs);
+    }
+    let model = &model;
     let grid = decode_grid(&r.grid)?;
     let chests: Vec<P> = r.chests.iter().map(|c| P::new(c[0], c[1], c[2])).collect();
     let entrance = snap_inside(&grid, P::new(r.entrance[0], r.entrance[1], r.entrance[2]));
@@ -159,6 +213,10 @@ fn plan_room(r: &RoomIn, model: &LegTimeModel, simple: Option<SimpleCharges>) ->
             p.trigger_s = c.trigger_s;
             p.turnaround_deg = c.corner_deg;
             p.turnaround_penalty_s = c.corner_s;
+        }
+        if let Some(cs) = shape_click {
+            p.trigger_s = cs;
+            p.turnaround_penalty_s = 0.0;
         }
         if let Some(m) = &r.params {
             if let Some(v) = m.get("timeScale") {
@@ -187,6 +245,12 @@ fn plan_room(r: &RoomIn, model: &LegTimeModel, simple: Option<SimpleCharges>) ->
             }
             if let Some(v) = m.get("breakReach") {
                 p.break_reach = *v;
+            }
+            if let Some(v) = m.get("bailFloor") {
+                p.bail_floor = *v;
+            }
+            if let Some(v) = m.get("triggerS") {
+                p.trigger_s = *v;
             }
         }
         // The grid is cheap to rebuild and the planner owns it, matching the Java CLI's
@@ -241,10 +305,10 @@ fn leak_mode(m: &str) -> &'static str {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() < 3 {
-        eprintln!("usage: lane_cli rooms.jsonl plans.jsonl legmodel.json|timemodel_simple.json [threads]");
+        eprintln!("usage: lane_cli rooms.jsonl plans.jsonl legmodel.json|timemodel_simple.json|timemodel_shape.json [threads]");
         std::process::exit(2);
     }
-    let (model, simple) = match load_any(&args[2]) {
+    let (model, simple, shape) = match load_any(&args[2]) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("[LaneCli] {}", e);
@@ -282,7 +346,7 @@ fn main() {
                 }
                 let result = match serde_json::from_str::<RoomIn>(line)
                     .map_err(|e| e.to_string())
-                    .and_then(|r| plan_room(&r, &model, simple))
+                    .and_then(|r| plan_room(&r, &model, simple, shape.as_ref()))
                 {
                     Ok(j) => j.to_string(),
                     Err(e) => {

@@ -1,0 +1,52 @@
+{
+  "name": "shape-2026-09-26",
+  "vRef": 0.2828,
+  "move": {
+    "run_open": 0.035458,
+    "run_mid": 0.038588,
+    "run_tight": 0.036947,
+    "up1": 0.04495,
+    "up_shaft": 0.0,
+    "drop_small": 0.051978,
+    "drop_big": 0.064792,
+    "t20": 0.035927,
+    "t60": 0.09277,
+    "t120": 0.104504,
+    "ta": 0.080023,
+    "turn_clr": 0.014167,
+    "ta_clr": 0.057061
+  },
+  "miners": {
+    "chain": {
+      "click": 0.286948,
+      "side": -0.037067,
+      "wide": -0.066023,
+      "behind": 0.043177,
+      "above": -0.001211,
+      "below": 0.006077,
+      "reach": 0.018727,
+      "burst": -0.110743,
+      "size": -0.033295,
+      "moveScale": 0.957745,
+      "roomEntryS": 2.1762,
+      "roomExitS": 0.5257,
+      "coverage": 0.9
+    },
+    "vein": {
+      "click": 0.055134,
+      "side": 0.018655,
+      "wide": -0.113887,
+      "behind": 0.048904,
+      "above": 0.01393,
+      "below": 0.10459,
+      "reach": 0.022766,
+      "burst": -0.014819,
+      "size": 0.029992,
+      "moveScale": 0.954752,
+      "roomEntryS": 1.2522,
+      "roomExitS": 0.6629,
+      "coverage": 0.9217
+    }
+  },
+  "fit": "move/shape time model (research/2026-09-26_shape): stage-1 move costs fitted on 4,904 clean chunks of drawn routes between reliably timed planned clicks over 11 vaults; stage-2 per miner: seconds = moveScale x moves + roomEntryS + roomExitS, fitted on whole plan epochs. Runs scale with vRef / movement speed. Clearance is the planner's own (grid clearanceFlyAt). LOVO room R2 chain 0.60 / vein 0.71; chart-style cpm error with coverage 2.7 % / 2.1 %."
+}

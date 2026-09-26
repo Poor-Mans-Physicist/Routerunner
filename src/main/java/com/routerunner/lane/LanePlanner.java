@@ -111,6 +111,9 @@ public final class LanePlanner {
         /** Chain triggers fired on the transition and the lane, and the fixed penalty seconds inside tTrans. */
         public int nTrig;
         public double tPen;
+        /** Shape model: the route's last cells before {@link #end} (up to five) and the blocks walked since the last click. */
+        public List<P> endBack = List.of();
+        public double endSinceTrig = SHAPE_NO_TRIG;
     }
 
     /** The finished plan. Times are model seconds (unscaled); the ghost timeline applies timeScale. */
@@ -134,8 +137,18 @@ public final class LanePlanner {
         final P pos;
         final double[] heading;
         final int prevBurst;
-        State(P pos, double[] heading, int prevBurst) { this.pos = pos; this.heading = heading; this.prevBurst = prevBurst; }
+        /** The route's last cells before {@code pos}, oldest first (up to five): the shape model's turn and heading window. */
+        final List<P> back;
+        /** Horizontal blocks walked since the last planned click ({@link #SHAPE_NO_TRIG} before the first). */
+        final double sinceTrig;
+        State(P pos, double[] heading, int prevBurst) { this(pos, heading, prevBurst, List.of(), SHAPE_NO_TRIG); }
+        State(P pos, double[] heading, int prevBurst, List<P> back, double sinceTrig) {
+            this.pos = pos; this.heading = heading; this.prevBurst = prevBurst; this.back = back; this.sinceTrig = sinceTrig;
+        }
     }
+
+    /** "No click yet" for the shape model's burst distance. */
+    static final double SHAPE_NO_TRIG = 1e9;
 
     private static final class Cand {
         final List<P> seq;
@@ -251,7 +264,7 @@ public final class LanePlanner {
     }
 
     private static double[] modelArray(LegTimeModel m) {
-        double[] out = new double[42];
+        double[] out = new double[43 + LegTimeModel.Shape.N];
         System.arraycopy(m.mean, 0, out, 0, 12);
         System.arraycopy(m.scale, 0, out, 12, 12);
         System.arraycopy(m.coef, 0, out, 24, 12);
@@ -261,6 +274,8 @@ public final class LanePlanner {
         out[39] = m.linWalk;
         out[40] = m.linClimb;
         out[41] = m.linDrop;
+        out[42] = m.shape != null ? 1 : 0;
+        if (m.shape != null) System.arraycopy(m.shape, 0, out, 43, LegTimeModel.Shape.N);
         return out;
     }
 
@@ -803,6 +818,7 @@ public final class LanePlanner {
         double turnIn = st.heading == null ? 0.0 : angle(st.heading, out);
         double[] tail = path.size() >= 2 ? hdir(path.get(path.size() - 2), path.get(path.size() - 1)) : hdir(pos, start);
         double align = angle(tail, d0);
+        if (model.shape != null) return evaluateShape(st, cells, path, remaining, flyPenalty, d0, tail, align);
         double tTrans = Grid.dist(pos, start) > 0.75 ? legTime(pos, start, path, remaining, st.prevBurst, turnIn) : 0.0;
         double penalty = (align > P.turnaroundDeg ? P.turnaroundPenaltyS : 0.0) + reversalPenalty(turnIn) + flyPenalty;
         List<Trigger> transTriggers = new ArrayList<>();
@@ -836,6 +852,194 @@ public final class LanePlanner {
         return e;
     }
 
+    // ---- the shape (move) model: a leg priced move by move from its cells ----
+
+    /**
+     * {@link #evaluate} for the shape model: the same path, sweeps and yields, with the transition and lane priced by
+     * {@link #shapeCost}. Junction turns and turnarounds are priced as moves, so only the flight penalty stays fixed.
+     */
+    private Lane evaluateShape(State st, List<P> cells, List<P> path, boolean[] remaining, double flyPenalty, double[] d0,
+                               double[] tail, double align) {
+        List<Trigger> transTriggers = new ArrayList<>();
+        int yTrans = path.size() > 1 ? sweep(path.subList(0, path.size() - 1), remaining, transTriggers) : 0;
+        List<Trigger> triggers = new ArrayList<>();
+        int yLane = sweep(cells, remaining, triggers);
+        int yTotal = yTrans + yLane;
+        if (yTotal == 0) return null;
+        List<P> seq = new ArrayList<>(st.back.size() + path.size() + cells.size());
+        seq.addAll(st.back);
+        int i0 = seq.size();
+        seq.addAll(path);
+        int split = seq.size() - 1;
+        seq.addAll(cells.subList(1, cells.size()));
+        List<Trigger> all = new ArrayList<>(transTriggers.size() + triggers.size());
+        all.addAll(transTriggers);
+        all.addAll(triggers);
+        int[] idx = new int[all.size()];
+        boolean[] inA = new boolean[all.size()];
+        int ptr = i0;
+        for (int i = 0; i < transTriggers.size(); i++) {
+            idx[i] = seqIndex(seq, ptr, transTriggers.get(i).cell);
+            ptr = idx[i];
+            inA[i] = true;
+        }
+        ptr = split;
+        for (int i = transTriggers.size(); i < all.size(); i++) {
+            idx[i] = seqIndex(seq, ptr, all.get(i).cell);
+            ptr = idx[i];
+        }
+        double[] sc = shapeCost(seq, i0, split, all, idx, inA, st.sinceTrig);
+        int pb = st.prevBurst;
+        for (Trigger t : triggers) pb = t.cleared.length;
+        P end = cells.get(cells.size() - 1);
+        Lane e = new Lane();
+        e.cells = cells; e.dir = d0; e.trans = path; e.yield = yTotal; e.yieldTrans = yTrans;
+        e.tTrans = sc[0] + flyPenalty; e.tLane = sc[1];
+        e.rate = yTotal / Math.max(e.tTrans + e.tLane, 0.05);
+        e.end = end;
+        e.dExit = P.exitWeight * (exitTime(end) - exitTime(st.pos));
+        e.rateX = exitAwareRate(yTotal, e.tTrans + e.tLane, e.dExit);
+        e.remaining = remaining; e.triggers = triggers; e.transTriggers = transTriggers;
+        e.nTrig = all.size(); e.tPen = flyPenalty;
+        e.endHeading = cells.size() == 1 ? tail : d0; e.endBurst = pb; e.align = align;
+        e.endBack = new ArrayList<>(seq.subList(Math.max(0, seq.size() - 6), seq.size() - 1));
+        e.endSinceTrig = sc[2];
+        return e;
+    }
+
+    /** First index at or after {@code from} whose cell is {@code cell}; {@code from} (with an error logged) when none is. */
+    private static int seqIndex(List<P> seq, int from, P cell) {
+        for (int j = from; j < seq.size(); j++) if (seq.get(j).equals(cell)) return j;
+        LOGGER.log(System.Logger.Level.ERROR, "[Routerunner] shape model: planned click cell " + cell + " is not on its leg; pricing it at leg index " + from + ".");
+        return from;
+    }
+
+    /** Degrees rounded to 1e-6, so Java and Rust agree on every bucket edge despite 1-ulp acos differences. */
+    static double roundDeg(double deg) {
+        return Math.round(deg * 1e6) / 1e6;
+    }
+
+    /** log1p(n) rounded to 1e-9, for the same reason. */
+    static double log1pRound(int n) {
+        return Math.round(Math.log1p(n) * 1e9) / 1e9;
+    }
+
+    /** Unsigned horizontal angle between two vectors, degrees (rounded); 0 when either is shorter than {@code minLen}. */
+    static double hAngle(double ax, double az, double bx, double bz, double minLen) {
+        double la = Math.sqrt(ax * ax + az * az), lb = Math.sqrt(bx * bx + bz * bz);
+        if (la < minLen || lb < minLen || la < 1e-9 || lb < 1e-9) return 0.0;
+        double c = (ax * bx + az * bz) / (la * lb);
+        return roundDeg(Math.toDegrees(Math.acos(Math.max(-1.0, Math.min(1.0, c)))));
+    }
+
+    /**
+     * Shape-model seconds for a stretch of route. {@code seq} is the route's previous cells followed by the stretch,
+     * which starts at index {@code i0}; steps, turns and clicks at or before cell {@code split} count as part A (the
+     * transition), the rest as part B (the lane). {@code trig} are the planned clicks in firing order, {@code idx} their
+     * cells' indices in {@code seq}, {@code inA} which part each belongs to. {@code sinceTrig0} is the horizontal walk
+     * since the last click before the stretch. Returns {A, B, horizontal walk since the last click at the stretch's end}.
+     *
+     * <p>Moves, as in the research fit: a step costs its run cost (open, mid or tight by the lower clearance of its two
+     * cells, times its horizontal length) plus a one-block step up, a shaft block, a small drop or a fall block; a turn is
+     * a local maximum of the heading change between the three cells before and after a cell (at least 20 degrees, one
+     * per seven cells), bucketed at 60 and 120 degrees with a clearance add-on, or a turnaround when it is at least 135
+     * degrees and the next three cells retrace the last four; a click costs its base plus its angle off the heading
+     * (from two cells back), target height, reach beyond three blocks, a burst discount within three blocks of the last
+     * click and its group size, floored at zero.
+     */
+    double[] shapeCost(List<P> seq, int i0, int split, List<Trigger> trig, int[] idx, boolean[] inA, double sinceTrig0) {
+        double[] c = model.shape;
+        int K = seq.size();
+        double[] harc = new double[K];
+        for (int j = 1; j < K; j++) harc[j] = harc[j - 1] + Grid.hdist(seq.get(j - 1), seq.get(j));
+        double a = 0.0, b = 0.0;
+        for (int j = Math.max(i0, 0); j < K - 1; j++) {
+            P p = seq.get(j), q = seq.get(j + 1);
+            double h = harc[j + 1] - harc[j];
+            int cl = Math.min(grid.clearanceFlyAt(p.x(), p.y(), p.z()), grid.clearanceFlyAt(q.x(), q.y(), q.z()));
+            double s = (cl >= 3 ? c[LegTimeModel.S_RUN_OPEN] : cl == 2 ? c[LegTimeModel.S_RUN_MID] : c[LegTimeModel.S_RUN_TIGHT]) * h;
+            int dy = q.y() - p.y();
+            if (dy == 1) s += c[LegTimeModel.S_UP1];
+            else if (dy >= 2) s += c[LegTimeModel.S_UP_SHAFT] * dy;
+            else if (dy <= -1 && dy >= -3) s += c[LegTimeModel.S_DROP_SMALL];
+            else if (dy < -3) s += c[LegTimeModel.S_DROP_BIG] * -dy;
+            if (j + 1 <= split) a += s; else b += s;
+        }
+        List<double[]> cand = new ArrayList<>();
+        for (int k = Math.max(2, i0 - 1); k <= K - 3; k++) {
+            int wi = Math.min(3, k), wo = Math.min(3, K - 1 - k);
+            P pk = seq.get(k), pa = seq.get(k - wi), pb = seq.get(k + wo);
+            double ax = pk.x() - pa.x(), az = pk.z() - pa.z(), bx = pb.x() - pk.x(), bz = pb.z() - pk.z();
+            double ang = hAngle(ax, az, bx, bz, 1.0);
+            if (ang >= 20.0) cand.add(new double[]{ang, k});
+        }
+        cand.sort((u, v) -> u[0] != v[0] ? Double.compare(v[0], u[0]) : Double.compare(v[1], u[1]));
+        boolean[] taken = new boolean[K];
+        List<double[]> turns = new ArrayList<>();
+        for (double[] cd : cand) {
+            int k = (int) cd[1];
+            boolean near = false;
+            for (int j = Math.max(0, k - 3); j <= Math.min(K - 1, k + 3); j++) if (taken[j]) { near = true; break; }
+            if (near) continue;
+            taken[k] = true;
+            turns.add(cd);
+        }
+        turns.sort((u, v) -> Double.compare(u[1], v[1]));
+        for (double[] cd : turns) {
+            double ang = cd[0];
+            int k = (int) cd[1];
+            P pk = seq.get(k);
+            int cl = grid.clearanceFlyAt(pk.x(), pk.y(), pk.z());
+            double tt = cl <= 1 ? 1.0 : cl == 2 ? 0.5 : 0.0;
+            boolean retrace = false;
+            if (ang >= 135.0) {
+                int b0 = Math.max(0, k - 4), f1 = Math.min(K, k + 4);
+                retrace = k > b0 && f1 > k + 1;
+                for (int f = k + 1; f < f1 && retrace; f++) {
+                    boolean close = false;
+                    for (int g = b0; g < k; g++) if (Grid.hdist(seq.get(f), seq.get(g)) <= 1.5) { close = true; break; }
+                    retrace = close;
+                }
+            }
+            double s = retrace ? c[LegTimeModel.S_TA] + c[LegTimeModel.S_TA_CLR] * tt
+                    : (ang < 60.0 ? c[LegTimeModel.S_T20] : ang < 120.0 ? c[LegTimeModel.S_T60] : c[LegTimeModel.S_T120])
+                    + c[LegTimeModel.S_TURN_CLR] * (tt * ang / 90.0);
+            if (k <= split) a += s; else b += s;
+        }
+        boolean hasPrev = false;
+        double prevArc = 0.0;
+        for (int i = 0; i < trig.size(); i++) {
+            Trigger t = trig.get(i);
+            int k = idx[i];
+            double gap = hasPrev ? harc[k] - prevArc : sinceTrig0 + (harc[k] - harc[i0]);
+            P cell = seq.get(k), back2 = seq.get(Math.max(0, k - 2));
+            double hx = cell.x() - back2.x(), hz = cell.z() - back2.z();
+            if (Math.sqrt(hx * hx + hz * hz) < 0.5) {
+                P fwd = seq.get(Math.min(K - 1, k + 2));
+                hx = fwd.x() - cell.x();
+                hz = fwd.z() - cell.z();
+            }
+            P ch = chests.get(t.chest);
+            double vx = ch.x() - cell.x(), vy = (ch.y() + 0.5) - (cell.y() + 1.62), vz = ch.z() - cell.z();
+            double ang = hAngle(hx, hz, vx, vz, 0.5);
+            double s = c[LegTimeModel.S_CLICK];
+            if (ang >= 30.0 && ang < 75.0) s += c[LegTimeModel.S_SIDE];
+            else if (ang >= 75.0 && ang < 120.0) s += c[LegTimeModel.S_WIDE];
+            else if (ang >= 120.0) s += c[LegTimeModel.S_BEHIND];
+            if (vy > 0.5) s += c[LegTimeModel.S_ABOVE];
+            else if (vy < -2.5) s += c[LegTimeModel.S_BELOW];
+            s += c[LegTimeModel.S_REACH] * Math.max(0.0, Math.sqrt(vx * vx + vy * vy + vz * vz) - 3.0);
+            if (gap <= 3.0) s += c[LegTimeModel.S_BURST];
+            s += c[LegTimeModel.S_SIZE] * log1pRound(t.cleared.length);
+            s = Math.max(0.0, s);
+            if (inA[i]) a += s; else b += s;
+            hasPrev = true;
+            prevArc = harc[k];
+        }
+        double since = hasPrev ? harc[K - 1] - prevArc : sinceTrig0 + (harc[K - 1] - harc[Math.min(i0, K - 1)]);
+        return new double[]{a, b, since};
+    }
+
     private Lane bestLane(State st, boolean[] remaining, int depth, double bail) {
         int K = depth > 0 ? P.proxyTopK : Math.max(3, P.proxyTopK / 2);
         List<Lane> evals = evalTop(st, remaining, bail, K);
@@ -845,7 +1049,7 @@ public final class LanePlanner {
         Lane best = null;
         double bestScore = -1;
         for (Lane e : evals.subList(0, Math.min(evals.size(), P.beamWidth))) {
-            State st2 = new State(e.end, e.endHeading, e.endBurst);
+            State st2 = new State(e.end, e.endHeading, e.endBurst, e.endBack, e.endSinceTrig);
             Lane f = bestLane(st2, e.remaining, depth - 1, bail);
             double score;
             if (f == null) {
@@ -911,7 +1115,7 @@ public final class LanePlanner {
             plan.yieldTotal += e.yield;
             plan.lanes.add(e);
             remaining = e.remaining;
-            st = new State(e.end, e.endHeading, e.endBurst);
+            st = new State(e.end, e.endHeading, e.endBurst, e.endBack, e.endSinceTrig);
         }
         List<P> exitPath = Grid.astar(grid, st.pos, exit, null);
         if (exitPath == null && P.allowFly) {
@@ -923,15 +1127,37 @@ public final class LanePlanner {
                 plan.exitStraight = true;
             }
         }
-        double tExit = exitPath != null ? legTime(st.pos, exit, exitPath, remaining, st.prevBurst, 0.0) : 0.0;
-        if (exitPath != null && exitPath.size() > 1) {
-            int y = sweep(exitPath.subList(1, exitPath.size()), remaining, plan.exitTriggers);
-            tExit += P.triggerS * plan.exitTriggers.size();
-            plan.yieldTotal += y;
+        double tExit;
+        if (model.shape == null) {
+            tExit = exitPath != null ? legTime(st.pos, exit, exitPath, remaining, st.prevBurst, 0.0) : 0.0;
+            if (exitPath != null && exitPath.size() > 1) {
+                int y = sweep(exitPath.subList(1, exitPath.size()), remaining, plan.exitTriggers);
+                tExit += P.triggerS * plan.exitTriggers.size();
+                plan.yieldTotal += y;
+            }
+        } else {
+            tExit = 0.0;
+            if (exitPath != null && exitPath.size() > 1) plan.yieldTotal += sweep(exitPath.subList(1, exitPath.size()), remaining, plan.exitTriggers);
+            if (exitPath != null) {
+                List<P> seq = new ArrayList<>(st.back.size() + exitPath.size());
+                seq.addAll(st.back);
+                int i0 = seq.size();
+                seq.addAll(exitPath);
+                int[] idx = new int[plan.exitTriggers.size()];
+                boolean[] inA = new boolean[idx.length];
+                int ptr = Math.min(i0 + 1, seq.size() - 1);
+                for (int i = 0; i < idx.length; i++) {
+                    idx[i] = seqIndex(seq, ptr, plan.exitTriggers.get(i).cell);
+                    ptr = idx[i];
+                    inA[i] = true;
+                }
+                double[] sc = shapeCost(seq, i0, seq.size() - 1, plan.exitTriggers, idx, inA, st.sinceTrig);
+                tExit = sc[0] + sc[1];
+            }
         }
         plan.exitPath = exitPath;
         plan.tExit = tExit;
-        plan.tTotal = t + tExit;
+        plan.tTotal = t + tExit + (model.shape != null ? model.shape[LegTimeModel.S_ROOM_FIXED] : 0.0);
         plan.cover = live == 0 ? 0 : (double) plan.yieldTotal / live;
         mergeRuns(plan);
         ghost(plan, entrance);

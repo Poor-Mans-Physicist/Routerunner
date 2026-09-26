@@ -91,6 +91,9 @@ pub extern "system" fn Java_com_routerunner_lane_NativeLane_create(
             lm.lin_climb = mv[40];
             lm.lin_drop = mv[41];
         }
+        if mv.len() >= 43 + crate::model::SHAPE_N && mv[42] != 0.0 {
+            lm.shape = Some(mv[43..43 + crate::model::SHAPE_N].to_vec());
+        }
         let boot = Params { point_mode: true, ..Params::default() };
         let p = Planner::new(g, pts, chain_range, chain_limit, boot, lm);
         Some(Box::into_raw(Box::new(p)) as jlong)
