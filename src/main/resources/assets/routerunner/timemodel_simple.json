@@ -1,10 +1,10 @@
 {
-  "name": "simple-2026-09-24",
-  "walk": 0.0456,
-  "climb": 0.0,
-  "drop": 0.034,
-  "triggerS": 0.228,
+  "name": "simple-2026-09-25",
+  "walk": 0.0566,
+  "climb": 0.0223,
+  "drop": 0.0,
+  "triggerS": 0.244,
   "cornerDeg": 90.0,
   "cornerS": 0.08,
-  "fit": "room time ~ walk x drawn 3D path + triggerS x planned clicks (solver replay) + drop x dropped + cornerS x corners >= 90; no intercept; 419 routed rooms, 7 vaults (5 chain, 2 vein), leave-one-vault-out R2 0.763, per-vault predicted/real 0.92-1.16; research/2026-09-23_vein/deepdive/fit_simple.py"
+  "fit": "room time ~ walk x planner walk length (horizontal on transitions, as the planner measures it) + climb x climbed + triggerS x planned clicks; no intercept; fitted on 419 routed rooms of 7 vaults (2026-09-22/24), out-of-sample on vault 20260925_202057 (170 rooms): total predicted/real 0.98, median room error 14.8 %; drop term dropped (fits gave 0 or negative); corner charge kept at 0.08 s as a judgment call (room-level fits negative, plan-leg fits +0.18). research/2026-09-25_ab/oos_simple.py"
 }
