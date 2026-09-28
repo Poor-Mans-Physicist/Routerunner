@@ -41,9 +41,16 @@ dependencies {
 
 jar {
     // The Rust lane planner (native/lane, `cargo build --release`) rides inside the jar and is unpacked at runtime.
+    // Windows comes from the local build; Linux and macOS from the `natives` GitHub workflow, downloaded into
+    // native/lane/dist/<platform>/ (see native/lane/README.md). A platform without a library plans in Java.
     from("native/lane/target/release") {
         include 'routerunner_lane.dll'
         into 'natives/windows-x64'
+    }
+    from("native/lane/dist") {
+        include 'linux-x64/librouterunner_lane.so', 'linux-arm64/librouterunner_lane.so',
+                'macos-x64/librouterunner_lane.dylib', 'macos-arm64/librouterunner_lane.dylib'
+        into 'natives'
     }
     manifest {
         attributes([

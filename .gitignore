@@ -16,3 +16,5 @@
 !/libs/README.md
 !/native/
 /native/lane/target/
+/native/lane/dist/
+/native/lane/dist-raw/

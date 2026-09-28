@@ -21,6 +21,28 @@ target\release\routerunner_lane.dll
 target\release\lane_cli.exe
 ```
 
+### Other platforms
+
+The jar carries one library per platform under `natives/<platform>/`. `NativeLane` picks the one for the running
+machine and falls back to the Java planner when there is none. Windows x64 (`routerunner_lane.dll`) comes from the
+local build above. `linux-x64`, `linux-arm64` (`librouterunner_lane.so`), `macos-x64` and `macos-arm64`
+(`librouterunner_lane.dylib`) come from the `natives` GitHub workflow (`.github/workflows/natives.yml`). It runs on
+pushes that touch `native/lane/`, or by hand under Actions → natives → Run workflow.
+
+The mod itself can't be built in CI, because the the_vault and vhapi jars are not redistributable. So fetch the
+libraries and build the release jar locally:
+
+```
+gh run download --repo Poor-Mans-Physicist/Routerunner --pattern "natives-*" --dir native/lane/dist-raw
+```
+
+Then move each `dist-raw/natives-<platform>/<library>` to `native/lane/dist/<platform>/<library>`. `gradlew build` packs
+every library it finds there. Both folders are gitignored.
+
+Java, Rust and JNI plans are byte-identical on Windows (`research/2026-09-28_test12/run_parity.py`). The other
+platforms link a different libm. The planner rounds angles and logarithms before comparing them for this reason, but
+those builds are not parity-tested yet.
+
 Stable toolchain, `x86_64-pc-windows-msvc`, no feature flags, no `.cargo/config.toml`. The release
 profile is `opt-level = 3`, `lto = "fat"`, `codegen-units = 1`; `panic` is deliberately left at
 `unwind` because the cdylib must not abort the JVM, and every JNI entry point wraps its body in
