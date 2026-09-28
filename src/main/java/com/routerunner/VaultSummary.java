@@ -21,4 +21,6 @@ public class VaultSummary {
     public List<String> modifiers = new ArrayList<>();
     /** Tracked item id to total picked up. */
     public Map<String, Long> loot = new HashMap<>();
+    /** Per-lap detail (1.2.0 on); null for vaults recorded earlier. */
+    public List<com.routerunner.calib.LapRecorder.Lap> lapDetail;
 }

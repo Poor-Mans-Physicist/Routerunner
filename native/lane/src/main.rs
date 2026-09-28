@@ -68,33 +68,12 @@ struct RawModel {
     sigma: f64,
 }
 
-#[derive(Deserialize)]
-struct RawSimple {
-    walk: f64,
-    #[serde(default)]
-    climb: f64,
-    #[serde(default)]
-    drop: f64,
-    #[serde(rename = "triggerS")]
-    trigger_s: f64,
-    #[serde(rename = "cornerDeg")]
-    corner_deg: f64,
-    #[serde(rename = "cornerS")]
-    corner_s: f64,
-}
-
-/// The simplified model's planner charges: seconds per click, and the corner threshold and charge.
-#[derive(Clone, Copy)]
-struct SimpleCharges {
-    trigger_s: f64,
-    corner_deg: f64,
-    corner_s: f64,
-}
-
 #[derive(Deserialize, Clone)]
 struct RawShape {
     #[serde(rename = "vRef", default)]
     v_ref: f64,
+    #[serde(rename = "speedElasticity", default)]
+    speed_elasticity: Option<f64>,
     #[serde(rename = "move")]
     moves: HashMap<String, f64>,
     miners: HashMap<String, HashMap<String, f64>>,
@@ -105,7 +84,7 @@ const SHAPE_MOVE: [&str; 13] =
 const SHAPE_CLICK: [&str; 9] = ["click", "side", "wide", "behind", "above", "below", "reach", "burst", "size"];
 
 /// The shape model for one miner at one speed: the same arithmetic, in the same order, as
-/// `LegTimeModel.Shape.forMiner`. Also returns the per-click seconds the planner's ghost uses
+/// `LegTimeModel.Shape.forMiner` (runs x round((vRef / speed)^speedElasticity, 1e-9)). Also returns the per-click seconds the planner's ghost uses
 /// (`Shape.clickS`).
 fn shape_for(raw: &RawShape, vein: bool, speed: f64) -> Result<(LegTimeModel, f64), String> {
     let b = raw.miners.get(if vein { "vein" } else { "chain" }).ok_or("shape model lacks a chain/vein block")?;
@@ -116,7 +95,14 @@ fn shape_for(raw: &RawShape, vein: bool, speed: f64) -> Result<(LegTimeModel, f6
     for (i, k) in SHAPE_MOVE.iter().enumerate() {
         c[i] = *raw.moves.get(*k).ok_or(format!("shape model lacks move cost {}", k))? * scale;
     }
-    let vs = v_ref / sp;
+    let el = match raw.speed_elasticity {
+        Some(e) => e,
+        None => {
+            eprintln!("[LaneCli] shape time model has no speedElasticity; runs scale 1:1 with movement speed.");
+            1.0
+        }
+    };
+    let vs = routerunner_lane::jcompat::jround((v_ref / sp).powf(el) * 1e9) as f64 / 1e9;
     c[model::S_RUN_OPEN] *= vs;
     c[model::S_RUN_MID] *= vs;
     c[model::S_RUN_TIGHT] *= vs;
@@ -130,23 +116,14 @@ fn shape_for(raw: &RawShape, vein: bool, speed: f64) -> Result<(LegTimeModel, f6
     Ok((m, click_s))
 }
 
-/// A ridge model file, a simplified model file (recognised by its `walk` field) with its charges,
-/// or a shape model file (recognised by its `miners` block; built per room in `plan_room`).
-fn load_any(path: &str) -> Result<(LegTimeModel, Option<SimpleCharges>, Option<RawShape>), String> {
+/// A ridge model file, or a shape model file (recognised by its `miners` block; built per room in `plan_room`).
+fn load_any(path: &str) -> Result<(LegTimeModel, Option<RawShape>), String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {}", path, e))?;
     if let Ok(raw) = serde_json::from_str::<RawShape>(&text) {
         let m = LegTimeModel::ridge([0.0; 12], [1.0; 12], [0.0; 12], 0.0, 0.0);
-        return Ok((m, None, Some(raw)));
+        return Ok((m, Some(raw)));
     }
-    if let Ok(raw) = serde_json::from_str::<RawSimple>(&text) {
-        let mut m = LegTimeModel::ridge([0.0; 12], [1.0; 12], [0.0; 12], 0.0, 0.0);
-        m.linear = true;
-        m.lin_walk = raw.walk;
-        m.lin_climb = raw.climb;
-        m.lin_drop = raw.drop;
-        return Ok((m, Some(SimpleCharges { trigger_s: raw.trigger_s, corner_deg: raw.corner_deg, corner_s: raw.corner_s }), None));
-    }
-    load_model(path).map(|m| (m, None, None))
+    load_model(path).map(|m| (m, None))
 }
 
 fn load_model(path: &str) -> Result<LegTimeModel, String> {
@@ -190,7 +167,7 @@ fn decode_grid(g: &GridIn) -> Result<SolidGrid, String> {
     Ok(grid)
 }
 
-fn plan_room(r: &RoomIn, model_in: &LegTimeModel, simple: Option<SimpleCharges>, shape: Option<&RawShape>) -> Result<J, String> {
+fn plan_room(r: &RoomIn, model_in: &LegTimeModel, shape: Option<&RawShape>) -> Result<J, String> {
     let mut model = model_in.clone();
     let mut shape_click = None;
     if let Some(raw) = shape {
@@ -209,11 +186,6 @@ fn plan_room(r: &RoomIn, model_in: &LegTimeModel, simple: Option<SimpleCharges>,
     for mode in &r.modes {
         let t0 = Instant::now();
         let mut p = Params { point_mode: mode == "point", ..Default::default() };
-        if let Some(c) = simple {
-            p.trigger_s = c.trigger_s;
-            p.turnaround_deg = c.corner_deg;
-            p.turnaround_penalty_s = c.corner_s;
-        }
         if let Some(cs) = shape_click {
             p.trigger_s = cs;
             p.turnaround_penalty_s = 0.0;
@@ -265,14 +237,26 @@ fn plan_room(r: &RoomIn, model_in: &LegTimeModel, simple: Option<SimpleCharges>,
             model.clone(),
         );
         let plan = planner.plan_all(entrance, exit);
-        let ex = export(
-            &planner.room,
-            &plan,
-            r.origin[0],
-            r.origin[1],
-            r.origin[2],
-            r.t_entry,
-        );
+        let summary = r.params.as_ref().and_then(|m| m.get("summary")).map(|v| *v != 0.0).unwrap_or(false);
+        let ex = if summary {
+            let n_trig: usize = plan.lanes.iter().map(|l| l.triggers.len() + l.trans_triggers.len()).sum::<usize>() + plan.exit_triggers.len();
+            o(vec![
+                ("tTotal", J::D(plan.t_total)),
+                ("yieldTotal", J::I(plan.yield_total as i64)),
+                ("cover", J::D(plan.cover)),
+                ("nLanes", J::I(plan.lanes.len() as i64)),
+                ("nTrig", J::I(n_trig as i64)),
+            ])
+        } else {
+            export(
+                &planner.room,
+                &plan,
+                r.origin[0],
+                r.origin[1],
+                r.origin[2],
+                r.t_entry,
+            )
+        };
         out.push((leak_mode(mode), ex));
         // Timed exactly where LaneCli times it: planning plus the export of the plan.
         let secs = t0.elapsed().as_secs_f64();
@@ -305,10 +289,10 @@ fn leak_mode(m: &str) -> &'static str {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() < 3 {
-        eprintln!("usage: lane_cli rooms.jsonl plans.jsonl legmodel.json|timemodel_simple.json|timemodel_shape.json [threads]");
+        eprintln!("usage: lane_cli rooms.jsonl plans.jsonl legmodel.json|timemodel_shape.json [threads]");
         std::process::exit(2);
     }
-    let (model, simple, shape) = match load_any(&args[2]) {
+    let (model, shape) = match load_any(&args[2]) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("[LaneCli] {}", e);
@@ -346,7 +330,7 @@ fn main() {
                 }
                 let result = match serde_json::from_str::<RoomIn>(line)
                     .map_err(|e| e.to_string())
-                    .and_then(|r| plan_room(&r, &model, simple, shape.as_ref()))
+                    .and_then(|r| plan_room(&r, &model, shape.as_ref()))
                 {
                     Ok(j) => j.to_string(),
                     Err(e) => {

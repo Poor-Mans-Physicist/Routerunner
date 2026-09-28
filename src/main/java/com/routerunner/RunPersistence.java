@@ -21,7 +21,7 @@ import java.util.Map;
  */
 public final class RunPersistence {
     private static final Logger LOG = LogUtils.getLogger();
-    private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
+    private static final Gson GSON = new GsonBuilder().setPrettyPrinting().serializeSpecialFloatingPointValues().create();
 
     private static Path file() {
         return FMLPaths.CONFIGDIR.get().resolve("routerunner").resolve("current_vault.json");
@@ -49,6 +49,7 @@ public final class RunPersistence {
             s.autoSampled = l.getAutoSampled();
             s.itemTotals = l.getItemTotals();
             s.modifiers = modifiers != null ? new ArrayList<>(modifiers) : new ArrayList<>();
+            s.laps = com.routerunner.calib.LapRecorder.state();
 
             Path p = file();
             Files.createDirectories(p.getParent());
@@ -72,6 +73,7 @@ public final class RunPersistence {
                     s.lap, s.lapStartTotal, s.lapStartNetMs, s.lapStartActiveMs);
             LootListener.get().restore(s.resolvedType, s.engaged, s.lootStartNet, s.lootStartActive,
                     s.autoCounts, s.autoSampled, s.itemTotals);
+            com.routerunner.calib.LapRecorder.restore(s.laps);
             LOG.info("[Routerunner] Resumed vault {} ({} chests).", vaultId, s.total);
             return s.modifiers != null ? s.modifiers : new ArrayList<>();
         } catch (Exception e) {
@@ -92,6 +94,8 @@ public final class RunPersistence {
 
     public static class Snapshot {
         public String vaultId;
+        /** The per-lap history recorded so far (absent in files from before 1.2.0). */
+        public com.routerunner.calib.LapRecorder.State laps;
         public int total;
         public long netMs;
         public long activeMs;

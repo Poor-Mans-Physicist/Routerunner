@@ -215,6 +215,7 @@ pub fn export(r: &Room, plan: &Plan, ox: i32, oy: i32, oz: i32, t_entry: i64) ->
     o(vec![
         ("exitPath", J::A(exit_w)),
         ("exitStraight", J::Bool(plan.exit_straight)),
+        ("exitHop", J::Bool(plan.exit_hop)),
         ("runs", J::A(runs)),
         ("ghost", J::A(ghost)),
         ("clears", J::A(clears)),
@@ -288,6 +289,7 @@ pub fn plan_json(plan: &Plan) -> J {
         ("runs", J::A(runs)),
         ("exitPath", exit),
         ("exitStraight", J::Bool(plan.exit_straight)),
+        ("exitHop", J::Bool(plan.exit_hop)),
         ("tTotal", J::D(plan.t_total)),
         ("tExit", J::D(plan.t_exit)),
         ("bail", J::D(plan.bail)),

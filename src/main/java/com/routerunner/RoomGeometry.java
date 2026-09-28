@@ -43,11 +43,18 @@ public final class RoomGeometry {
         public final List<String> otherIds;
         public final P entranceLocal;
         public final P exitLocal;
+        /** Door cell per wall (0 = W, 1 = E, 2 = N, 3 = S), null where the wall has no door. */
+        public final P[] gateByWall;
+        /** Walls of the entrance and exit doors, -1 when there is no door. */
+        public final int entranceWall, exitWall;
+        /** The adaptive room picker's decision for the exit, or null when the exit is the opposite wall. */
+        public final RoomPicker.Decision pick;
         /** World origin of local (0,0,0). */
         public final int ox, oy, oz;
 
         Snapshot(SolidGrid grid, List<P> tl, List<BlockPos> tw, List<P> ol, List<String> oi,
-                 P entrance, P exit, int ox, int oy, int oz) {
+                 P entrance, P exit, P[] gateByWall, int entranceWall, int exitWall, RoomPicker.Decision pick,
+                 int ox, int oy, int oz) {
             this.grid = grid;
             this.targetsLocal = tl;
             this.targetsWorld = tw;
@@ -55,6 +62,10 @@ public final class RoomGeometry {
             this.otherIds = oi;
             this.entranceLocal = entrance;
             this.exitLocal = exit;
+            this.gateByWall = gateByWall;
+            this.entranceWall = entranceWall;
+            this.exitWall = exitWall;
+            this.pick = pick;
             this.ox = ox;
             this.oy = oy;
             this.oz = oz;
@@ -66,6 +77,19 @@ public final class RoomGeometry {
      * {@code targetsLocal} means the cell has no target chests. Main thread only.
      */
     public static Snapshot build(Level level, int regionX, int regionZ, String targetSubstring, BlockPos playerPos) {
+        return build(level, regionX, regionZ, targetSubstring, playerPos, null);
+    }
+
+    /** Chooses a room's exit from its entrance wall and which walls have doors; null keeps the opposite wall. */
+    public interface ExitChooser {
+        RoomPicker.Decision choose(int entranceWall, boolean[] open);
+    }
+
+    /**
+     * As {@link #build(Level, int, int, String, BlockPos)}, with the exit door picked by {@code chooser} when it
+     * returns a decision, else the door opposite the entrance.
+     */
+    public static Snapshot build(Level level, int regionX, int regionZ, String targetSubstring, BlockPos playerPos, ExitChooser chooser) {
         int ox = regionX * CELL;
         int oz = regionZ * CELL;
 
@@ -106,7 +130,8 @@ public final class RoomGeometry {
         int sy;
         if (targetsWorld.isEmpty()) {
             return new Snapshot(new SolidGrid(CELL, 1, CELL), new ArrayList<>(), new ArrayList<>(),
-                    new ArrayList<>(), new ArrayList<>(), new P(0, 0, 0), new P(0, 0, 0), ox, level.getMinBuildHeight(), oz);
+                    new ArrayList<>(), new ArrayList<>(), new P(0, 0, 0), new P(0, 0, 0), new P[4], -1, -1, null,
+                    ox, level.getMinBuildHeight(), oz);
         }
         oy = minY - PAD_BELOW;
         sy = Math.min(MAX_HEIGHT, (maxY + PAD_ABOVE) - oy + 1);
@@ -139,6 +164,10 @@ public final class RoomGeometry {
         addGate(gates, grid, 23, 0, 23, 1, 2);
         addGate(gates, grid, 23, CELL - 1, 23, CELL - 2, 3);
 
+        P[] gateByWall = new P[4];
+        for (int[] g : gates) gateByWall[g[3]] = new P(g[0], g[1], g[2]);
+        int entWall = -1, exWall = -1;
+        RoomPicker.Decision pick = null;
         P entrance, exit;
         if (gates.isEmpty()) {
             // no doorway detected: route from the player's position back to itself
@@ -161,6 +190,14 @@ public final class RoomGeometry {
             int oppWall = oppositeWall(ent[3]);
             int[] ex = null;
             for (int[] g : gates) if (g[3] == oppWall) ex = g;
+            if (chooser != null) {
+                boolean[] open = new boolean[4];
+                for (int[] g : gates) open[g[3]] = true;
+                pick = chooser.choose(ent[3], open);
+                if (pick != null) {
+                    for (int[] g : gates) if (g[3] == pick.exit()) ex = g;
+                }
+            }
             if (ex == null) { // no opposite gate: farthest from the entrance, else the entrance itself
                 long fd = -1;
                 for (int[] g : gates) {
@@ -173,12 +210,16 @@ public final class RoomGeometry {
             }
             entrance = new P(ent[0], ent[1], ent[2]);
             exit = new P(ex[0], ex[1], ex[2]);
+            entWall = ent[3];
+            exWall = ex[3];
+            if (pick != null && pick.exit() != exWall) pick = null;
         }
 
         List<P> othersLocal = new ArrayList<>(othersWorld.size());
         for (BlockPos p : othersWorld) othersLocal.add(new P(p.getX() - ox, p.getY() - oy, p.getZ() - oz));
 
-        return new Snapshot(grid, targetsLocal, targetsWorld, othersLocal, otherIds, entrance, exit, ox, oy, oz);
+        return new Snapshot(grid, targetsLocal, targetsWorld, othersLocal, otherIds, entrance, exit, gateByWall, entWall, exWall, pick,
+                ox, oy, oz);
     }
 
     /** Vault chest type substrings, in the index order used by {@link #scanCounts}. */

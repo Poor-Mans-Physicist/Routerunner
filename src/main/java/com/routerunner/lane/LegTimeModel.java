@@ -12,9 +12,8 @@ import java.nio.file.Path;
  *   <li>the tier-one learned ridge regression on log(seconds) over twelve planner-computable geometry features,
  *   standardised; coefficients from {@code research/legmodel_ridge.json} (fitted by {@code tools/legmodel.py}), feature
  *   order and transforms as in {@code tools/lanes.py LegTimeModel.vec};</li>
- *   <li>the simplified linear model ({@link #simple()}): seconds = walk x path length + climb x climbed + drop x
- *   dropped, fitted on drawn routes against real room times. Its per-click and corner charges ride on the planner's
- *   {@code triggerS} and turnaround parameters, see {@link Simple};</li>
+ *   <li>a linear form (seconds = walk x path length + climb x climbed + drop x dropped), the retired "simple" model's
+ *   shape, still understood by the planner and the native library but no longer bundled or selectable;</li>
  *   <li>the shape (move) model ({@link #shape()}): the planner prices every leg move by move from its cells (runs by
  *   clearance, steps, drops, turns, turnarounds) and every planned click from its geometry, see {@link Shape} and
  *   {@code LanePlanner.shapeCost}. {@link #shape} then holds the per-miner coefficients.</li>
@@ -182,62 +181,10 @@ public final class LegTimeModel {
     }
 
     /**
-     * The simplified time model and the planner charges that go with it: {@link #triggerS} per planned click, and
-     * {@link #cornerS} for a junction turn of at least {@link #cornerDeg}. The corner charge goes through the planner's
-     * turnaround parameters: full past {@code cornerDeg} at a lane start, ramped in from 60 degrees for a transition's
-     * first turn.
-     */
-    public static final class Simple {
-        public final LegTimeModel model;
-        public final double triggerS, cornerDeg, cornerS;
-        public final String name;
-
-        Simple(LegTimeModel model, double triggerS, double cornerDeg, double cornerS, String name) {
-            this.model = model;
-            this.triggerS = triggerS;
-            this.cornerDeg = cornerDeg;
-            this.cornerS = cornerS;
-            this.name = name;
-        }
-    }
-
-    private static volatile Simple simple;
-
-    /** The simplified time model bundled in the jar ({@code assets/routerunner/timemodel_simple.json}). Cached. */
-    public static Simple simple() {
-        Simple s = simple;
-        if (s != null) return s;
-        try (Reader r = new java.io.InputStreamReader(
-                java.util.Objects.requireNonNull(LegTimeModel.class.getResourceAsStream("/assets/routerunner/timemodel_simple.json"),
-                        "bundled timemodel_simple.json missing"), java.nio.charset.StandardCharsets.UTF_8)) {
-            s = fromRawSimple(new Gson().fromJson(r, RawSimple.class));
-        } catch (Exception e) {
-            throw new IllegalStateException("bundled simplified time model unreadable", e);
-        }
-        simple = s;
-        return s;
-    }
-
-    /** Load a simplified time model from a JSON file (the CLI's {@code --simple} option). */
-    public static Simple loadSimple(Path json) throws java.io.IOException {
-        try (Reader r = Files.newBufferedReader(json)) {
-            RawSimple raw = new Gson().fromJson(r, RawSimple.class);
-            if (raw == null || !(raw.walk > 0)) throw new java.io.IOException("simplified time model at " + json + " has no positive walk cost");
-            return fromRawSimple(raw);
-        }
-    }
-
-    private static Simple fromRawSimple(RawSimple raw) {
-        double[] one = new double[12];
-        java.util.Arrays.fill(one, 1.0);
-        LegTimeModel m = new LegTimeModel(new double[12], one, new double[12], 0.0, 0.0, null, true, raw.walk, raw.climb, raw.drop);
-        return new Simple(m, raw.triggerS, raw.cornerDeg, raw.cornerS, raw.name == null ? "simple" : raw.name);
-    }
-
-    /**
      * The shape (move) time model, fitted on drawn routes against how long this player took over each stretch
      * ({@code research/2026-09-26_shape}). Move costs are shared by both miners; click costs, the move-time scale and
-     * the fixed room entry and exit seconds are per miner. Runs scale with {@code vRef / movement speed}.
+     * the fixed room entry and exit seconds are per miner. Runs scale with {@code (vRef / movement speed)^speedElasticity}
+     * (0.6: the median moving speed rises about 0.6x as fast as the attribute), rounded to 1e-9 so Java and Rust agree.
      */
     public static final class Shape {
         public static final int N = 24;
@@ -246,20 +193,47 @@ public final class LegTimeModel {
         static final String[] CLICK = {"click", "side", "wide", "behind", "above", "below", "reach", "burst", "size"};
         public final String name;
         public final double vRef;
+        public final double speedElasticity;
         final double[] move;
         final double[][] click;
         final double[] moveScale, roomEntryS, roomExitS, coverage;
+        /** Mean room switch (s), and the sparse-room tap floor: seconds per click for pruning below a clumpiness. */
+        final double[] switchS, sparseTapS, sparseClumpBelow;
+        /** The benchmark player's real over trail-priced seconds: a + b x ln(clumpiness), per miner (player calibration). */
+        final double[] benchKa, benchKb;
 
-        Shape(String name, double vRef, double[] move, double[][] click, double[] moveScale, double[] roomEntryS,
-              double[] roomExitS, double[] coverage) {
+        Shape(String name, double vRef, double speedElasticity, double[] move, double[][] click, double[] moveScale,
+              double[] roomEntryS, double[] roomExitS, double[] coverage, double[] switchS, double[] sparseTapS, double[] sparseClumpBelow,
+              double[] benchKa, double[] benchKb) {
             this.name = name;
             this.vRef = vRef;
+            this.speedElasticity = speedElasticity;
             this.move = move;
             this.click = click;
             this.moveScale = moveScale;
             this.roomEntryS = roomEntryS;
             this.roomExitS = roomExitS;
             this.coverage = coverage;
+            this.switchS = switchS;
+            this.sparseTapS = sparseTapS;
+            this.sparseClumpBelow = sparseClumpBelow;
+            this.benchKa = benchKa;
+            this.benchKb = benchKb;
+        }
+
+        /** Clumpiness range the benchmark curve was fitted over; outside it the curve is held at its end value. */
+        static final double BENCH_CLUMP_MIN = 5.0, BENCH_CLUMP_MAX = 1000.0;
+
+        /**
+         * The benchmark player's real seconds per second of their own trail's price, at a room clumpiness (the size of
+         * the touching group the average target chest sits in). Their trails price about 15 % above their real time,
+         * because a real trail's small wiggles count as turns; dividing a player's ratio by this cancels that
+         * (research/2026-09-28_player_calib).
+         */
+        public double benchK(boolean vein, double clump) {
+            int m = vein ? 1 : 0;
+            double c = Math.max(BENCH_CLUMP_MIN, Math.min(BENCH_CLUMP_MAX, clump > 0 ? clump : BENCH_CLUMP_MIN));
+            return benchKa[m] + benchKb[m] * Math.log(c);
         }
 
         /**
@@ -276,7 +250,7 @@ public final class LegTimeModel {
             }
             double[] c = new double[N];
             for (int i = 0; i < MOVE.length; i++) c[i] = move[i] * moveScale[m];
-            double vs = vRef / sp;
+            double vs = Math.round(Math.pow(vRef / sp, speedElasticity) * 1e9) / 1e9;
             c[S_RUN_OPEN] *= vs;
             c[S_RUN_MID] *= vs;
             c[S_RUN_TIGHT] *= vs;
@@ -296,6 +270,22 @@ public final class LegTimeModel {
         /** Chests the player collects per chest the plan counts (projections only). */
         public double coverage(boolean vein) {
             return coverage[vein ? 1 : 0];
+        }
+
+        /** The measured mean room switch (seconds from one room's last break to the next room's first). */
+        public double switchS(boolean vein) {
+            return switchS[vein ? 1 : 0];
+        }
+
+        /**
+         * The seconds per click pruning uses in a room of this clumpiness: at least {@code sparseTapS} below
+         * {@code sparseClumpBelow} (aiming at scattered small groups costs more than the fitted click), else
+         * {@code base}. Off (returns {@code base}) when the model sets no floor for the miner.
+         */
+        public double pruneTapS(boolean vein, double clump, double base) {
+            int m = vein ? 1 : 0;
+            if (!(sparseTapS[m] > 0) || !(clump < sparseClumpBelow[m])) return base;
+            return Math.max(base, sparseTapS[m]);
         }
     }
 
@@ -335,6 +325,7 @@ public final class LegTimeModel {
         }
         double[][] click = new double[2][Shape.CLICK.length];
         double[] scale = new double[2], entry = new double[2], exit = new double[2], cov = new double[2];
+        double[] sw = new double[2], tap = new double[2], clumpBelow = new double[2], ka = new double[2], kb = new double[2];
         String[] miners = {"chain", "vein"};
         for (int m = 0; m < 2; m++) {
             java.util.Map<String, Double> b = raw.miners.get(miners[m]);
@@ -347,25 +338,30 @@ public final class LegTimeModel {
             entry[m] = b.getOrDefault("roomEntryS", 0.0);
             exit[m] = b.getOrDefault("roomExitS", 0.0);
             cov[m] = b.getOrDefault("coverage", 1.0);
+            sw[m] = b.getOrDefault("switchS", 1.1);
+            tap[m] = b.getOrDefault("sparseTapS", 0.0);
+            clumpBelow[m] = b.getOrDefault("sparseClumpBelow", 0.0);
+            if (!b.containsKey("benchKa")) {
+                System.getLogger("Routerunner").log(System.Logger.Level.ERROR,
+                        "[Routerunner] shape time model at " + where + " has no " + miners[m] + " benchKa; the player calibration assumes the benchmark prices its trails at real time (k 1.0).");
+            }
+            ka[m] = b.getOrDefault("benchKa", 1.0);
+            kb[m] = b.getOrDefault("benchKb", 0.0);
         }
-        return new Shape(raw.name == null ? "shape" : raw.name, raw.vRef > 0 ? raw.vRef : 0.2828, move, click, scale, entry, exit, cov);
+        if (raw.speedElasticity == null) {
+            System.getLogger("Routerunner").log(System.Logger.Level.ERROR,
+                    "[Routerunner] shape time model at " + where + " has no speedElasticity; runs scale 1:1 with movement speed.");
+        }
+        return new Shape(raw.name == null ? "shape" : raw.name, raw.vRef > 0 ? raw.vRef : 0.2828,
+                raw.speedElasticity == null ? 1.0 : raw.speedElasticity, move, click, scale, entry, exit, cov, sw, tap, clumpBelow, ka, kb);
     }
 
     private static final class RawShape {
         String name;
         double vRef;
+        Double speedElasticity;
         java.util.Map<String, Double> move;
         java.util.Map<String, java.util.Map<String, Double>> miners;
-    }
-
-    private static final class RawSimple {
-        String name;
-        double walk;
-        double climb;
-        double drop;
-        double triggerS;
-        double cornerDeg;
-        double cornerS;
     }
 
     private static final class Raw {

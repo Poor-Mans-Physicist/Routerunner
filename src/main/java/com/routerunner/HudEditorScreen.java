@@ -34,14 +34,14 @@ public class HudEditorScreen extends Screen {
     protected void init() {
         int bx = 5;
         for (RouterunnerConfig.HudElementId id : RouterunnerConfig.HudElementId.values()) {
-            this.addRenderableWidget(new Button(bx, this.height - 26, 70, 20, toggleLabel(id), b -> {
+            this.addRenderableWidget(new Button(bx, this.height - 50, 70, 20, toggleLabel(id), b -> {
                 RouterunnerConfig.ElementConfig ec = RouterunnerConfig.get().element(id);
                 ec.visible = !ec.visible;
                 b.setMessage(toggleLabel(id));
             }));
             bx += 74;
         }
-        this.addRenderableWidget(new Button(bx, this.height - 26, 90, 20, lootToggleLabel(), b -> {
+        this.addRenderableWidget(new Button(5, this.height - 26, 90, 20, lootToggleLabel(), b -> {
             RouterunnerConfig cfg = RouterunnerConfig.get();
             cfg.lootPanelVisible = !cfg.lootPanelVisible;
             b.setMessage(lootToggleLabel());
@@ -61,6 +61,7 @@ public class HudEditorScreen extends Screen {
 
     private static String label(RouterunnerConfig.HudElementId id) {
         switch (id) {
+            case ELAPSED:    return "Time";
             case TOTAL:      return "Total";
             case NET_AVG:    return "Net";
             case ACTIVE_AVG: return "Active";

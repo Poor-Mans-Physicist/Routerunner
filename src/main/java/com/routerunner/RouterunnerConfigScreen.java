@@ -1,20 +1,19 @@
 package com.routerunner;
 
 import com.mojang.blaze3d.vertex.PoseStack;
-import com.mojang.logging.LogUtils;
-import net.minecraft.Util;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.TextComponent;
 
-import java.nio.file.Files;
-
-/** Top-level config menu (opened by the keybind): toggles on the left, HUD editor, history, laps, logs and help on the right. */
+/**
+ * Top-level config menu (opened by the keybind): the everyday toggles on the left, the sub-menus (routing, visuals,
+ * HUD layout, past vaults, data and logs) on the right.
+ */
 public class RouterunnerConfigScreen extends Screen {
-    private static final int STEP = 24;
+    static final int STEP = 24;
     private static final int LEFT_ROWS = 6;
-    private static final int RIGHT_ROWS = 7;
+    private static final int RIGHT_ROWS = 5;
 
     private final Screen parent;
     private int top;
@@ -29,7 +28,7 @@ public class RouterunnerConfigScreen extends Screen {
         int cx = this.width / 2;
         int step = STEP;
         int rows = Math.max(LEFT_ROWS, RIGHT_ROWS);
-        top = topFor(rows, step);
+        top = topFor(this.height, rows, step);
         int lx = cx - 154, rx = cx + 4, bw = 150;
 
         int y = top;
@@ -52,82 +51,49 @@ public class RouterunnerConfigScreen extends Screen {
             b.setMessage(trackedLabel());
         }));
         y += step;
-        this.addRenderableWidget(new Button(lx, y, bw, 20, hunterLabel(), b -> {
-            RouterunnerConfig cfg = RouterunnerConfig.get();
-            cfg.suppressHunter = !cfg.suppressHunter;
-            b.setMessage(hunterLabel());
-        }));
-        y += step;
-        this.addRenderableWidget(new Button(lx, y, bw, 20, arrowLabel(), b -> {
-            RouterunnerConfig cfg = RouterunnerConfig.get();
-            cfg.offscreenIndicator = !cfg.offscreenIndicator;
-            b.setMessage(arrowLabel());
-        }));
-        y += step;
-        this.addRenderableWidget(new Button(lx, y, bw, 20, adaptiveLabel(), b -> {
-            RouterunnerConfig cfg = RouterunnerConfig.get();
-            cfg.adaptiveLearning = !cfg.adaptiveLearning;
-            b.setMessage(adaptiveLabel());
-        }, (b, pose, mx, my) -> this.renderTooltip(pose, new TextComponent(
-                com.routerunner.adaptive.Adaptive.statusLine() + " (" + com.routerunner.adaptive.Adaptive.detailLine() + ")"), mx, my)));
-
-        y = top;
-        this.addRenderableWidget(new Button(rx, y, bw, 20, new TextComponent("Edit HUD Layout"),
-                b -> this.minecraft.setScreen(new HudEditorScreen(this))));
-        y += step;
-        this.addRenderableWidget(new Button(rx, y, bw, 20, new TextComponent("View Past Vaults"),
-                b -> this.minecraft.setScreen(new HistoryScreen(this))));
-        y += step;
-        this.addRenderableWidget(new Button(rx, y, bw, 20, timeModelLabel(), b -> {
+        this.addRenderableWidget(new Button(lx, y, bw, 20, timeModelLabel(), b -> {
             RouterunnerConfig cfg = RouterunnerConfig.get();
             cfg.timeModel = RouterunnerConfig.nextTimeModel(cfg.timeModel);
             RunLog.timeModel(cfg.timeModel, "menu");
             b.setMessage(timeModelLabel());
-        }, (b, pose, mx, my) -> this.renderTooltip(pose, new TextComponent(
-                "Learned: the adaptive leg model. Simple: route length, clicks, drops, sharp corners (fixed). "
-                        + "Shape: runs, turns, turnarounds and clicks priced move by move (fixed). Key: ]"), mx, my)));
+        }, (b, pose, mx, my) -> this.renderTooltip(pose, this.font.split(new TextComponent(
+                "Shape: runs, turns and clicks priced move by move, scaled to your measured speed. "
+                        + "Learned: the adaptive leg model. Applies from the next room plan."), 250), mx, my)));
         y += step;
-        this.addRenderableWidget(new Button(rx, y, bw, 20, new TextComponent("New Lap"), b -> {
+        this.addRenderableWidget(new Button(lx, y, bw, 20, new TextComponent("New Lap"), b -> {
             int lap = ClientEvents.newLap();
             b.setMessage(new TextComponent(lap > 0 ? "Lap " + lap + " started ✓" : "New Lap (not in a vault)"));
         }));
         y += step;
-        this.addRenderableWidget(new Button(rx, y, bw, 20, new TextComponent("Open Log Folder"),
-                b -> openLogFolder()));
-        y += step;
-        this.addRenderableWidget(new Button(rx, y, bw, 20, new TextComponent("Help"),
+        this.addRenderableWidget(new Button(lx, y, bw, 20, new TextComponent("Help"),
                 b -> this.minecraft.setScreen(new HelpScreen(this))));
+
+        y = top;
+        this.addRenderableWidget(new Button(rx, y, bw, 20, new TextComponent("Routing..."),
+                b -> this.minecraft.setScreen(new RoutingScreen(this))));
         y += step;
-        this.addRenderableWidget(new Button(rx, y, bw, 20, new TextComponent("Reset Adaptive Model"), b -> {
-            if (!resetArmed) {
-                resetArmed = true;
-                b.setMessage(new TextComponent("Click again to reset"));
-                return;
-            }
-            resetArmed = false;
-            com.routerunner.adaptive.Adaptive.resetLearned();
-            b.setMessage(new TextComponent("Adaptive model reset ✓"));
-        }));
+        this.addRenderableWidget(new Button(rx, y, bw, 20, new TextComponent("Visuals and QoL..."),
+                b -> this.minecraft.setScreen(new VisualsScreen(this))));
+        y += step;
+        this.addRenderableWidget(new Button(rx, y, bw, 20, new TextComponent("HUD Layout"),
+                b -> this.minecraft.setScreen(new HudEditorScreen(this))));
+        y += step;
+        this.addRenderableWidget(new Button(rx, y, bw, 20, new TextComponent("Past Vaults"),
+                b -> this.minecraft.setScreen(new HistoryScreen(this))));
+        y += step;
+        this.addRenderableWidget(new Button(rx, y, bw, 20, new TextComponent("Data and Logs..."),
+                b -> this.minecraft.setScreen(new DataLogsScreen(this))));
 
         this.addRenderableWidget(new Button(cx - 100, top + rows * step + 14, 200, 20,
                 new TextComponent("Done"), b -> this.onClose()));
     }
 
     /** Start the columns high enough that the longer one AND the Done button below it still fit the screen. */
-    private int topFor(int rows, int step) {
+    static int topFor(int height, int rows, int step) {
         int needed = rows * step + 14 + 20;
-        int t = this.height / 4;
-        if (t + needed > this.height - 4) t = this.height - 4 - needed;
+        int t = height / 4;
+        if (t + needed > height - 4) t = height - 4 - needed;
         return Math.max(24, t);
-    }
-
-    private static void openLogFolder() {
-        try {
-            Files.createDirectories(RunLog.runsDir());
-            Util.getPlatform().openFile(RunLog.runsDir().toFile());
-        } catch (Exception e) {
-            LogUtils.getLogger().error("[Routerunner] failed to open log folder", e);
-        }
     }
 
     private Component enabledLabel() {
@@ -142,22 +108,8 @@ public class RouterunnerConfigScreen extends Screen {
         return new TextComponent("Track loot: " + RouterunnerConfig.get().trackedChest.name());
     }
 
-    private Component hunterLabel() {
-        return new TextComponent("Hunter boxes: " + (RouterunnerConfig.get().suppressHunter ? "Hidden" : "Shown"));
-    }
-
-    private boolean resetArmed = false;
-
-    private Component adaptiveLabel() {
-        return new TextComponent("Adaptive learning: " + (RouterunnerConfig.get().adaptiveLearning ? "On" : "Off"));
-    }
-
     private Component timeModelLabel() {
         return new TextComponent("Time model: " + RouterunnerConfig.timeModelLabel(RouterunnerConfig.get().timeModel));
-    }
-
-    private Component arrowLabel() {
-        return new TextComponent("Target arrow: " + (RouterunnerConfig.get().offscreenIndicator ? "On" : "Off"));
     }
 
     private static RouterunnerConfig.TrackedChest nextTracked(RouterunnerConfig.TrackedChest cur) {

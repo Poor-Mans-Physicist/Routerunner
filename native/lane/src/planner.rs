@@ -147,6 +147,8 @@ pub struct Plan {
     pub cover: f64,
     pub exit_path: Option<Vec<P>>,
     pub exit_straight: bool,
+    /// The exit was only reachable by a warp: a walk to a take-off cell and a hop out (or a wide flight).
+    pub exit_hop: bool,
     pub exit_triggers: Vec<Trigger>,
     pub ghost: Vec<[f64; 6]>,
     pub clears: Vec<(f64, u32, Vec<u32>)>,
@@ -688,6 +690,79 @@ fn flight_from(r: &Room, c: &mut Cache, a: P, b: P, max_hops: i32) -> Option<Vec
             .clone()
     };
     flight(g, &r.succ, sc, fsc, &mut lof, a, b, max_hops)
+}
+
+/// Take-off cells tried by the exit safety net, nearest the exit first.
+const EXIT_TAKEOFFS: usize = 48;
+/// Take-off cells sampled evenly from the rest of the walkable component when the nearest ones find no hop.
+const EXIT_WIDE_TAKEOFFS: usize = 1024;
+/// Hops of the wide flight tried when no single take-off hop reaches the exit.
+const EXIT_WIDE_HOPS: i32 = 5;
+
+/// The exit safety net, used only when neither a walk nor a 3-hop flight reaches the exit (a sunken or roofed
+/// part of the room with no way up on foot): walk to one of the `EXIT_TAKEOFFS` reachable cells nearest the exit
+/// (ties: higher, then lower x, then lower z), warp to a landing in its line of sight from which the exit can be
+/// walked, then walk out. When none of those has such a landing (the cells nearest the exit can sit under the very
+/// ledge that blocks it), up to `EXIT_WIDE_TAKEOFFS` of the remaining reachable cells, evenly spaced in that order,
+/// are tried. The cheapest take-off / landing pair wins (straight distance to the take-off, the hop, the hop's length
+/// and the walk out). Mirrors `LanePlanner.takeOffExit`.
+fn take_off_exit(r: &Room, c: &mut Cache, a: P, b: P) -> Option<Vec<P>> {
+    let reach = reachable_from(r, c, a);
+    let g = &r.g;
+    let mut cand: Vec<P> = Vec::new();
+    for x in 0..g.sx {
+        for y in 0..g.sy {
+            for z in 0..g.sz {
+                if bit(&reach, g.idx(x, y, z)) {
+                    cand.push(P::new(x, y, z));
+                }
+            }
+        }
+    }
+    cand.sort_by(|u, v| {
+        dcmp(dist(*u, b), dist(*v, b))
+            .then(v.y.cmp(&u.y))
+            .then(u.x.cmp(&v.x))
+            .then(u.z.cmp(&v.z))
+    });
+    let mut best: Option<(f64, P, P)> = None;
+    {
+        let Cache { landing, exit_field, .. } = &mut *c;
+        let field = exit_field.as_ref()?;
+        let near = EXIT_TAKEOFFS.min(cand.len());
+        let rest = cand.len() - near;
+        let stride = ((rest + EXIT_WIDE_TAKEOFFS - 1) / EXIT_WIDE_TAKEOFFS).max(1);
+        for pass in 0..2 {
+            if best.is_some() {
+                break;
+            }
+            let (from, to, step) = if pass == 0 { (0, near, 1) } else { (near, cand.len(), stride) };
+            for t in cand[from..to].iter().step_by(step) {
+                let lands = if pass == 0 {
+                    let k = g.idx(t.x, t.y, t.z) as u32;
+                    landing.entry(k).or_insert_with(|| Rc::new(grid::landings(g, *t))).clone()
+                } else {
+                    Rc::new(grid::landings(g, *t))
+                };
+                let base = dist(a, *t) + grid::HOP_COST;
+                for l in lands.iter() {
+                    let w = field[g.idx(l.x, l.y, l.z)];
+                    if w.is_nan() {
+                        continue;
+                    }
+                    let cost = base + grid::FLIGHT_COST_PER_BLOCK * dist(*t, *l) + w;
+                    if best.map_or(true, |(bc, _, _)| cost < bc) {
+                        best = Some((cost, *t, *l));
+                    }
+                }
+            }
+        }
+    }
+    let (_, t, l) = best?;
+    let mut out = astar_plain(r, c, a, t)?;
+    let rest = astar_plain(r, c, l, b)?;
+    out.extend(rest);
+    Some(out)
 }
 
 /// The forward walkable component from a position, cached per cell for the plan's lifetime.
@@ -1593,6 +1668,15 @@ fn plan_impl(r: &Room, c: &mut Cache, entrance: P, exit: P, remaining_in: Vec<bo
     let mut exit_path = astar_plain(r, c, st.pos, exit);
     if exit_path.is_none() && r.p.allow_fly {
         exit_path = flight_from(r, c, st.pos, exit, 3);
+        if exit_path.is_none() {
+            exit_path = take_off_exit(r, c, st.pos, exit);
+            if exit_path.is_none() {
+                exit_path = flight_from(r, c, st.pos, exit, EXIT_WIDE_HOPS);
+            }
+            if exit_path.is_some() {
+                plan.exit_hop = true;
+            }
+        }
         if exit_path.is_none() {
             exit_path = Some(vec![st.pos, exit]);
             plan.exit_straight = true;

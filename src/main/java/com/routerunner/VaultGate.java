@@ -7,27 +7,25 @@ import org.slf4j.Logger;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
 /**
- * The per-vault density gate: a vault whose rooms hold fewer than {@link #MIN_DENSITY} target chests on average is
- * too sparse to learn from or to be worth a run log. Decided once, from the first {@link #DECIDE_ROOMS} rooms
- * entered (a room = a cell whose first scan held at least {@link DensityTracker#MIN_ROOM_CHESTS} chests of some type),
- * or at vault exit from however many rooms there were. The density is the tracked chest type's average first-scan
- * count, or under AUTO / ALL the highest average of any type. A rejected vault's run log is deleted, nothing more is
- * written for it, and the adaptive model drops what it had staged; the rejection sticks for that vault id until the
- * game restarts, so a reconnect does not start a fresh log.
+ * The per-vault density gate: a vault passes as soon as the player enters a room holding at least
+ * {@link #MIN_DENSITY} chests of any scanned type (the room's largest count over every scan of it, so a room first
+ * seen half-loaded from the hallway still counts once it fills in). Until then it is undecided: the run log keeps
+ * writing and the adaptive model stages what it sees. A vault that never passes is rejected at exit, or when a
+ * rejected vault id comes back after a reconnect: its run log is deleted (unless config {@code forceRunLog} is on,
+ * which keeps every log) and the adaptive model drops what it staged. The rejection sticks for that vault id until the
+ * game restarts.
  */
 public final class VaultGate {
     private static final Logger LOG = LogUtils.getLogger();
     public static final double MIN_DENSITY = 150.0;
-    public static final int DECIDE_ROOMS = 3;
 
     public enum State { UNDECIDED, PASS, FAIL }
 
-    private static final Map<Long, int[]> firstCounts = new HashMap<>();
+    private static final Map<Long, int[]> maxCounts = new HashMap<>();
     private static final Set<Long> entered = new LinkedHashSet<>();
     private static final Set<String> rejectedVaults = new HashSet<>();
     private static State state = State.UNDECIDED;
@@ -41,7 +39,7 @@ public final class VaultGate {
 
     /** Vault entry (or reconnect): start undecided, unless this vault id was already rejected this session. */
     public static synchronized void reset() {
-        firstCounts.clear();
+        maxCounts.clear();
         entered.clear();
         state = State.UNDECIDED;
         vaultId = null;
@@ -56,103 +54,91 @@ public final class VaultGate {
             if (again) state = State.FAIL;
         }
         if (again) {
-            LOG.info("[Routerunner] vault {} was already rejected by the density gate this session; not logging or learning from it.", id);
-            RunLog.discardVault("rejected earlier this session");
+            LOG.info("[Routerunner] vault {} was already rejected by the density gate this session; not learning from it.", id);
+            dropLog("rejected earlier this session");
             Adaptive.onGateDecided(false);
+        com.routerunner.calib.PlayerCalibration.onGateDecided(false);
         }
     }
 
-    /** A cell was scanned with per-type target counts ({@link RoomGeometry#TYPES} order); only the first scan counts. */
-    public static synchronized void onScan(long cellKey, int[] counts) {
-        if (counts == null || firstCounts.containsKey(cellKey)) return;
-        firstCounts.put(cellKey, counts.clone());
+    /** A cell was scanned with per-type target counts ({@link RoomGeometry#TYPES} order); the gate keeps each type's largest count. */
+    public static void onScan(long cellKey, int[] counts) {
+        if (counts == null) return;
+        boolean check;
+        synchronized (VaultGate.class) {
+            int[] m = maxCounts.get(cellKey);
+            if (m == null) {
+                maxCounts.put(cellKey, counts.clone());
+            } else {
+                for (int i = 0; i < m.length && i < counts.length; i++) m[i] = Math.max(m[i], counts[i]);
+            }
+            check = state == State.UNDECIDED && entered.contains(cellKey);
+        }
+        if (check) tryPass(cellKey);
     }
 
     /** The player stands in the cell. */
     public static void onEnter(long cellKey) {
-        boolean decide;
         synchronized (VaultGate.class) {
             if (state != State.UNDECIDED || !entered.add(cellKey)) return;
-            decide = rooms() >= DECIDE_ROOMS;
         }
-        if (decide) decide("first " + DECIDE_ROOMS + " rooms");
+        tryPass(cellKey);
     }
 
-    /** Vault exit: a vault that never reached the room count is judged on what it had (no rooms = rejected). */
+    /** Vault exit: a vault that never had a room of {@link #MIN_DENSITY} chests is rejected now. */
     public static void onVaultExit() {
-        boolean undecided;
-        synchronized (VaultGate.class) {
-            undecided = state == State.UNDECIDED;
-        }
-        if (undecided) decide("vault exit");
-    }
-
-    private static int rooms() {
-        int n = 0;
-        for (long key : entered) {
-            int[] c = firstCounts.get(key);
-            if (c != null && max(c) >= DensityTracker.MIN_ROOM_CHESTS) n++;
-        }
-        return n;
-    }
-
-    private static void decide(String when) {
-        boolean pass;
-        int n;
-        double dens;
+        int rooms;
+        int densest;
         String id;
         synchronized (VaultGate.class) {
             if (state != State.UNDECIDED) return;
-            int types = RoomGeometry.TYPES.length;
-            double[] sum = new double[types];
-            n = 0;
-            for (long key : entered) {
-                int[] c = firstCounts.get(key);
-                if (c == null || max(c) < DensityTracker.MIN_ROOM_CHESTS) continue;
-                for (int i = 0; i < types && i < c.length; i++) sum[i] += c[i];
-                n++;
-            }
-            int fixed = fixedTypeIndex();
-            dens = 0;
-            if (n > 0) {
-                if (fixed >= 0) dens = sum[fixed] / n;
-                else for (double v : sum) dens = Math.max(dens, v / n);
-            }
-            pass = n > 0 && dens >= MIN_DENSITY;
-            state = pass ? State.PASS : State.FAIL;
+            state = State.FAIL;
             id = vaultId;
-            if (!pass && id != null) rejectedVaults.add(id);
+            if (id != null) rejectedVaults.add(id);
+            rooms = 0;
+            densest = 0;
+            for (long key : entered) {
+                int[] c = maxCounts.get(key);
+                if (c == null || max(c) < DensityTracker.MIN_ROOM_CHESTS) continue;
+                rooms++;
+                densest = Math.max(densest, max(c));
+            }
         }
-        String what = String.format(Locale.ROOT, "%.0f %s chests/room over %d room(s) at %s", dens, typeLabel(), n, when);
-        if (pass) {
-            LOG.info("[Routerunner] density gate passed: {} (threshold {}).", what, (int) MIN_DENSITY);
-            RunLog.densityGate(dens, n, MIN_DENSITY);
-            Adaptive.onGateDecided(true);
-        } else {
-            LOG.info("[Routerunner] density gate rejected this vault: {}, under {}; no run log and no learning for it.", what, (int) MIN_DENSITY);
-            RunLog.discardVault("density " + String.format(Locale.ROOT, "%.0f", dens) + " < " + (int) MIN_DENSITY);
-            Adaptive.onGateDecided(false);
-        }
+        LOG.info("[Routerunner] density gate rejected this vault at exit: no entered room held {} chests of any type ({} room(s), densest {}); no learning from it.",
+                (int) MIN_DENSITY, rooms, densest);
+        dropLog("no room of " + (int) MIN_DENSITY + "+ chests");
+        Adaptive.onGateDecided(false);
+        com.routerunner.calib.PlayerCalibration.onGateDecided(false);
     }
 
-    /** Index of the configured chest type, or -1 when tracking is AUTO or ALL (then the densest type counts). */
-    private static int fixedTypeIndex() {
-        String t;
-        switch (RouterunnerConfig.get().trackedChest) {
-            case GILDED: t = "gilded"; break;
-            case ORNATE: t = "ornate"; break;
-            case LIVING: t = "living"; break;
-            case WOODEN: t = "wooden"; break;
-            default: return -1;
+    /** Pass the vault if the entered cell holds at least {@link #MIN_DENSITY} chests of some type. */
+    private static void tryPass(long cellKey) {
+        int best;
+        String type;
+        synchronized (VaultGate.class) {
+            if (state != State.UNDECIDED) return;
+            int[] c = maxCounts.get(cellKey);
+            if (c == null) return;
+            int bi = 0;
+            for (int i = 1; i < c.length; i++) if (c[i] > c[bi]) bi = i;
+            best = c[bi];
+            if (best < MIN_DENSITY) return;
+            type = bi < RoomGeometry.TYPES.length ? RoomGeometry.TYPES[bi] : "type " + bi;
+            state = State.PASS;
         }
-        for (int i = 0; i < RoomGeometry.TYPES.length; i++) if (RoomGeometry.TYPES[i].equals(t)) return i;
-        LOG.error("[Routerunner] density gate: tracked chest type {} is not a scanned type; judging the densest type instead.", t);
-        return -1;
+        LOG.info("[Routerunner] density gate passed: a room with {} {} chests (threshold {} of any type).", best, type, (int) MIN_DENSITY);
+        RunLog.densityGate(best, 1, MIN_DENSITY);
+        Adaptive.onGateDecided(true);
+        com.routerunner.calib.PlayerCalibration.onGateDecided(true);
     }
 
-    private static String typeLabel() {
-        int i = fixedTypeIndex();
-        return i >= 0 ? RoomGeometry.TYPES[i] : "densest-type";
+    /** Delete this vault's run log, unless forced logging keeps it. */
+    private static void dropLog(String why) {
+        if (RouterunnerConfig.get().forceRunLog) {
+            LOG.info("[Routerunner] forced logging is on: keeping this vault's run log ({}).", why);
+            return;
+        }
+        RunLog.discardVault(why);
     }
 
     private static int max(int[] c) {

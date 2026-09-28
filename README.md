@@ -3,18 +3,22 @@
 A client-side Forge mod for [Wold's Vaults](https://www.curseforge.com/minecraft/modpacks/wolds-vaults) (Minecraft 1.18.2)
 that helps you loot more chests per minute in vaults.
 
-- **Live metrics HUD.** Total chests broken, average chests/min (overall and with pauses excluded), a sliding 1 minute
-  average that turns green or red when it runs more than 25 chests/min above or below the lap's active average, the
-  lap's average room density (target chests per room, read at each room's first scan), and per-chest-type loot rates.
-  Can also hide Hunter boxes.
+- **Live metrics HUD.** The lap's active time, total chests broken, average chests/min (overall and with pauses
+  excluded), a sliding 1 minute average that turns green or red when it runs more than 25 chests/min above or below the
+  lap's active average, and per-chest-type loot rates. A room density readout is available as a debug aid (off by
+  default).
 - **Lane route.** A planner solves each room as you enter it, and draws the route on the floor: a chain of short runs
   through the densest chests, a heat map over the chests to mine, green markers on the next target cluster, purple
   arrows for dashes, and a green exit path when the room becomes sparse enough to not be worth looting further.
-  It assumes Chain Miner; without it the routes will be wrong.
-- **Self Learning.** The solver is self learning, meaning it watches you while you play in real time and adapts
-  to your playstyle to create the fastest routes specific to the way you move. It takes some time to warm up,
-  but should generally make using the solver feel much better after using it for several minutes as it adapts.
-- **Vault history.** Every vault you finish is saved with its chest count, rates, modifiers and loot totals.
+  Routes are planned for your mining ability: Chain Miner or Vein Miner.
+- **Next room.** The adaptive room picker leaves each room by the door toward the best unvisited rooms around it,
+  using the loaded rooms' chest counts and the vault's chunk-alignment pattern. Challenge rooms that lock you in only
+  get the way out drawn, and the labyrinth is never routed into.
+- **Your speed.** Routes are priced move by move (runs, turns, climbs, clicks) with timings measured on the author's
+  play, then scaled to you: every room you loot, the path you actually walked is priced the same way and compared
+  with your real time, so the planner learns how fast you are without penalising you for leaving the route.
+- **Vault history.** Every vault you finish is saved with its chest count, rates, modifiers and loot totals, and, per
+  lap, charts of your chests/min against your own predicted pace and the author's benchmark on the same rooms.
 - **Run logs.** Each vault writes a `vault_*.jsonl` file with the planned routes, your path, every chest break and the
   per-room comparison of your run with the reference solver's, which is what the planner's timing model is fitted on.
 
@@ -34,25 +38,26 @@ To uninstall, delete the jar. Settings and logs live in `config/routerunner/` in
 
 Press **`[`** to open the menu. You can rebind it under Options → Controls → Routerunner.
 
-**Left column (toggles)**
+**Left column**
 
 | Button | What it does |
 | --- | --- |
 | Routerunner | Turns the whole mod on or off. |
 | Route overlay | Shows or hides the drawn route. Rooms are still solved and logged with it hidden. |
 | Track loot | Which chest type's loot to rate: `AUTO` (picks after 100 chests), `GILDED`, `ORNATE`, `LIVING`, `WOODEN`, or `ALL` (hides the loot panel). Changing it clears the loot counters. |
-| Hunter boxes | Hides or shows Hunter boxes (chests, doors and the rest) so they don't clutter the route. |
-| Target arrow | A screen-edge arrow toward the next target chests while they are out of view. |
+| Time model | `Shape` (default): routes priced move by move and scaled to your measured speed. `Learned`: the older adaptive leg model. |
+| New Lap | Resets the HUD counters and starts a new lap in the vault's history, without touching the vault's log. Handy for comparing attempts in the same vault. |
+| Help | In-game guide to the route colours and markers. |
 
-**Right column (actions)**
+**Right column (menus)**
 
 | Button | What it does |
 | --- | --- |
-| Edit HUD Layout | Drag the readouts and the loot panel wherever you want. Toggles along the bottom show or hide each one. |
-| View Past Vaults | Scrollable list of your finished vaults, newest first. |
-| New Lap | Resets the HUD counters without touching the vault's log. Handy for comparing attempts in the same vault. |
-| Open Log Folder | Opens the folder with the `vault_*.jsonl` run logs. |
-| Help | In-game guide to the route colours and markers. |
+| Routing... | Next room (Adaptive / Straight), the target arrow, your measured speed per miner with its reset, and the Learned model's adaptive learning with its reset. |
+| Visuals and QoL... | Opacity sliders for everything Routerunner draws (a master slider plus one per element; 0 % hides it), the Vault Mapper axis lines and the Hunter box toggle. |
+| HUD Layout | Drag the readouts and the loot panel wherever you want. Toggles along the bottom show or hide each one. |
+| Past Vaults | Your finished vaults, newest first. Click one for its laps; click a lap for its charts: **Actual** (what you got over the rooms you looted, idle removed), **Your Pace** (what the same room plans predict at your measured speed) and **Benchmark** (the author on the same plans), plus room density and clumpiness. |
+| Data and Logs... | Run log: Gated (only vaults with a 150+ chest room keep their log) or Always, and the log folder. |
 
 **Reading the route**
 
@@ -81,7 +86,7 @@ cd native/lane && cargo build --release
 ./gradlew build
 ```
 
-Without the library the mod still builds and runs on its Java planner (same plans, about eight times slower).
+Without the library the mod still builds and runs on its Java planner (same plans, about eight times slower). Linux and macOS libraries come from the `natives` GitHub workflow; see `native/lane/README.md`.
 
 ## Contributing
 

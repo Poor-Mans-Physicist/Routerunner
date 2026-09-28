@@ -14,13 +14,13 @@ import java.util.Date;
 import java.util.List;
 import java.util.Locale;
 
-/** Simple scrollable viewer of completed-vault summaries (newest first). */
+/** Scrollable list of completed-vault summaries (newest first); click a vault for its laps. */
 public class HistoryScreen extends Screen {
     private final Screen parent;
     private List<VaultSummary> entries;
     private double scroll = 0;
     private static final int ROW_H = 30;
-    private static final SimpleDateFormat FMT = new SimpleDateFormat("MM/dd HH:mm");
+    static final SimpleDateFormat FMT = new SimpleDateFormat("MM/dd HH:mm");
 
     public HistoryScreen(Screen parent) {
         super(new TextComponent("Past Vaults"));
@@ -37,6 +37,7 @@ public class HistoryScreen extends Screen {
 
     private int listTop() { return 32; }
     private int listBottom() { return this.height - 36; }
+    private int listX() { return Math.max(10, this.width / 2 - 180); }
 
     @Override
     public void render(PoseStack ps, int mouseX, int mouseY, float partialTicks) {
@@ -53,10 +54,13 @@ public class HistoryScreen extends Screen {
 
         int top = listTop();
         int bottom = listBottom();
-        int x = Math.max(10, this.width / 2 - 180);
+        int x = listX();
         int y = top - (int) scroll;
-        for (VaultSummary s : entries) {
+        int hovered = rowAt(mouseX, mouseY);
+        for (int i = 0; i < entries.size(); i++) {
+            VaultSummary s = entries.get(i);
             if (y >= top && y <= bottom) {
+                if (i == hovered) fill(ps, x - 4, y - 3, x + 364, y + ROW_H - 6, 0x30FFFFFF);
                 String laps = s.laps > 1 ? String.format("  ·  %d laps", s.laps) : "";
                 String line1 = String.format("%s  ·  %s  ·  %d chests%s  ·  %.1f/min active (%.1f net)",
                         FMT.format(new Date(s.timestamp)), RouterunnerHud.cap(s.type), s.chests, laps,
@@ -68,10 +72,28 @@ public class HistoryScreen extends Screen {
             y += ROW_H;
         }
         super.render(ps, mouseX, mouseY, partialTicks);
+        if (hovered >= 0) this.renderTooltip(ps, new TextComponent("Click for laps and charts"), mouseX, mouseY);
+    }
+
+    /** The entry under the mouse, or -1. */
+    private int rowAt(double mx, double my) {
+        if (my < listTop() || my > listBottom() || mx < listX() - 4 || mx > listX() + 364) return -1;
+        int i = (int) Math.floor((my - listTop() + scroll + 3) / ROW_H);
+        return i >= 0 && i < entries.size() ? i : -1;
+    }
+
+    @Override
+    public boolean mouseClicked(double mouseX, double mouseY, int button) {
+        int i = rowAt(mouseX, mouseY);
+        if (button == 0 && i >= 0 && this.minecraft != null) {
+            this.minecraft.setScreen(new VaultDetailScreen(this, entries.get(i)));
+            return true;
+        }
+        return super.mouseClicked(mouseX, mouseY, button);
     }
 
     /** The vault's modifiers that name its tracked chest type, or all of them if the type is unresolved. */
-    private static String modifierLine(VaultSummary s) {
+    static String modifierLine(VaultSummary s) {
         if (s.modifiers == null || s.modifiers.isEmpty()) return "(no modifiers recorded)";
         String type = s.type == null ? "" : s.type.toLowerCase(Locale.ROOT);
         if (type.isEmpty() || type.equals("unknown")) {

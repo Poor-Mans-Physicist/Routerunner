@@ -7,7 +7,6 @@ import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.Tesselator;
 import com.mojang.blaze3d.vertex.VertexFormat;
 import com.mojang.math.Matrix4f;
-import com.routerunner.solver.P;
 import net.minecraft.client.Camera;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.Font;
@@ -22,6 +21,8 @@ import net.minecraftforge.client.gui.IIngameOverlay;
 /** In-game HUD overlay: the four chest-rate readouts, the movable loot panel and the off-screen target arrow. */
 public class RouterunnerHud implements IIngameOverlay {
     public static final RouterunnerHud INSTANCE = new RouterunnerHud();
+    /** Colour of the off-screen arrow to the next target. */
+    static final int NEXT_TARGET_COLOR = 0xFFFF3FB0;
     /** Length (px) of the off-screen target arrow. */
     private static final float ARROW_PX = 12.0f;
     /** Distance (px) the arrow keeps from the screen edge. */
@@ -38,19 +39,22 @@ public class RouterunnerHud implements IIngameOverlay {
 
         Font font = mc.font;
         MetricsTracker m = MetricsTracker.get();
+        float aStats = Visuals.alpha(Visuals.Element.HUD_STATS);
         for (RouterunnerConfig.HudElementId id : RouterunnerConfig.HudElementId.values()) {
             RouterunnerConfig.ElementConfig ec = cfg.element(id);
             if (!ec.visible) continue;
-            font.drawShadow(poseStack, textFor(id, m), ec.x, ec.y, colorFor(id, m));
+            Visuals.drawShadow(poseStack, font, textFor(id, m), ec.x, ec.y, colorFor(id, m), aStats);
         }
 
-        if (cfg.lootPanelVisible && cfg.trackedChest != RouterunnerConfig.TrackedChest.ALL) {
-            renderLootPanel(poseStack, mc, font, cfg.lootPanelX, cfg.lootPanelY);
+        float aLoot = Visuals.alpha(Visuals.Element.HUD_LOOT);
+        if (aLoot > 0f && cfg.lootPanelVisible && cfg.trackedChest != RouterunnerConfig.TrackedChest.ALL) {
+            renderLootPanel(poseStack, mc, font, cfg.lootPanelX, cfg.lootPanelY, aLoot);
         }
 
         if (cfg.routingEnabled) {
-            font.drawShadow(poseStack, routeStatusLine(), 5, height - 12, 0x9AA0FF);
-            if (cfg.offscreenIndicator) renderOffscreenIndicator(poseStack, mc, font, width, height);
+            Visuals.drawShadow(poseStack, font, routeStatusLine(), 5, height - 12, 0x9AA0FF, Visuals.alpha(Visuals.Element.HUD_STATUS));
+            float aArrow = Visuals.alpha(Visuals.Element.HUD_ARROW);
+            if (cfg.offscreenIndicator && aArrow > 0f) renderOffscreenIndicator(poseStack, mc, font, width, height, aArrow);
         }
     }
 
@@ -66,22 +70,13 @@ public class RouterunnerHud implements IIngameOverlay {
      * Screen-edge arrow and distance for the current route target while it is outside the view, computed from
      * the camera so it holds in third person.
      */
-    private static void renderOffscreenIndicator(PoseStack ps, Minecraft mc, Font font, int width, int height) {
+    private static void renderOffscreenIndicator(PoseStack ps, Minecraft mc, Font font, int width, int height, float alpha) {
         RouteService.SolvedRoute sr = RouteService.current();
         if (sr == null) return;
-        BlockPos w;
         com.routerunner.lane.LaneRoute lr = sr.lane;
-        if (lr != null) {
-            w = lr.indicatorTarget();
-            if (w == null) return;
-        } else {
-            P target = sr.retargetPos;
-            if (target == null) {
-                if (sr.cursor >= sr.plan.waypoints.size()) return;
-                target = sr.plan.waypoints.get(sr.cursor).pos;
-            }
-            w = sr.worldOf(target);
-        }
+        if (lr == null) return;
+        BlockPos w = lr.indicatorTarget();
+        if (w == null) return;
         Camera camera = mc.gameRenderer.getMainCamera();
         Vec3 c = camera.getPosition();
         double dx = w.getX() + 0.5 - c.x, dy = w.getY() + 0.5 - c.y, dz = w.getZ() + 0.5 - c.z;
@@ -109,17 +104,17 @@ public class RouterunnerHud implements IIngameOverlay {
         if (t <= 0 || t == Double.MAX_VALUE) return;
         double ax = width / 2.0 + ux * t, ay = height / 2.0 + uy * t;
 
-        drawArrow(ps, ax, ay, ux, uy, ARROW_PX, RouteRenderer.NEXT_LABEL_COLOR);
+        drawArrow(ps, ax, ay, ux, uy, ARROW_PX, NEXT_TARGET_COLOR, alpha);
         String txt = ((int) Math.round(dist)) + "m";
         int tw = font.width(txt);
         float tx = (float) clamp(ax - ux * (ARROW_PX + 4.0) - tw / 2.0, 2.0, width - tw - 2.0);
         float ty = (float) clamp(ay - uy * (ARROW_PX + 4.0) - 4.0, 2.0, height - 10.0);
-        font.drawShadow(ps, txt, tx, ty, RouteRenderer.NEXT_LABEL_COLOR);
+        Visuals.drawShadow(ps, font, txt, tx, ty, NEXT_TARGET_COLOR, alpha);
     }
 
     /** A filled triangle centred on {@code (x,y)} pointing along the unit vector {@code (ux,uy)} (a degenerate quad). */
-    private static void drawArrow(PoseStack ps, double x, double y, double ux, double uy, float size, int color) {
-        float a = ((color >> 24) & 0xFF) / 255.0f;
+    private static void drawArrow(PoseStack ps, double x, double y, double ux, double uy, float size, int color, float alpha) {
+        float a = ((color >> 24) & 0xFF) / 255.0f * alpha;
         float r = ((color >> 16) & 0xFF) / 255.0f;
         float g = ((color >> 8) & 0xFF) / 255.0f;
         float b = (color & 0xFF) / 255.0f;
@@ -167,6 +162,7 @@ public class RouterunnerHud implements IIngameOverlay {
 
     public static String textFor(RouterunnerConfig.HudElementId id, MetricsTracker m) {
         switch (id) {
+            case ELAPSED:    return "Time: " + clock(m.getActiveMs() - m.getLapStartActiveMs());
             case TOTAL:      return "Chests: " + m.getLapTotal();
             case NET_AVG:    return String.format("Net Avg: %.1f/min", m.getLapNetAvgPerMin());
             case ACTIVE_AVG: return String.format("Active Avg: %.1f/min", m.getLapActiveAvgPerMin());
@@ -179,25 +175,32 @@ public class RouterunnerHud implements IIngameOverlay {
         }
     }
 
+    /** Active time as m:ss, or h:mm:ss from an hour. */
+    static String clock(long ms) {
+        long s = Math.max(0L, ms / 1000L);
+        long h = s / 3600, mi = (s % 3600) / 60, se = s % 60;
+        return h > 0 ? String.format("%d:%02d:%02d", h, mi, se) : String.format("%d:%02d", mi, se);
+    }
+
     /** The movable loot panel: one icon + Tot/Act/1m per tracked item for the resolved chest type. */
-    private static void renderLootPanel(PoseStack ps, Minecraft mc, Font font, int x, int y) {
+    private static void renderLootPanel(PoseStack ps, Minecraft mc, Font font, int x, int y, float alpha) {
         LootListener loot = LootListener.get();
         if (loot.autoWaiting()) {
-            font.drawShadow(ps, String.format("Loot: detecting vault (%d/100)", loot.autoProgress()), x, y, 0xAAAAAA);
+            Visuals.drawShadow(ps, font, String.format("Loot: detecting vault (%d/100)", loot.autoProgress()), x, y, 0xAAAAAA, alpha);
             return;
         }
         if (!loot.isActive()) return;
-        font.drawShadow(ps, cap(loot.getResolvedType()) + " loot /min", x, y, 0xFFD700);
+        Visuals.drawShadow(ps, font, cap(loot.getResolvedType()) + " loot /min", x, y, 0xFFD700, alpha);
         int i = 0;
         for (String key : loot.keysForDisplay()) {
             int ly = y + 12 + i * 18;
             ItemStack sprite = loot.sprite(key);
             if (sprite != null && !sprite.isEmpty()) {
-                mc.getItemRenderer().renderGuiItem(sprite, x, ly);
+                Visuals.renderGuiItem(mc, sprite, x, ly, alpha);
             }
             String txt = String.format("T %.1f  A %.1f  1m %.1f",
                     loot.netPerMin(key), loot.activePerMin(key), loot.slidingPerMin(key));
-            font.drawShadow(ps, txt, x + 20, ly + 4, 0xFFFFFF);
+            Visuals.drawShadow(ps, font, txt, x + 20, ly + 4, 0xFFFFFF, alpha);
             i++;
         }
     }

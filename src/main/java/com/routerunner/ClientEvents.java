@@ -53,16 +53,6 @@ public class ClientEvents {
         while (KeyBindings.OPEN_MENU.consumeClick()) {
             mc.setScreen(new RouterunnerConfigScreen(null));
         }
-        while (KeyBindings.TOGGLE_TIME_MODEL.consumeClick()) {
-            RouterunnerConfig cfg = RouterunnerConfig.get();
-            cfg.timeModel = RouterunnerConfig.nextTimeModel(cfg.timeModel);
-            RouterunnerConfig.save();
-            RunLog.timeModel(cfg.timeModel, "key");
-            if (mc.player != null) {
-                mc.player.displayClientMessage(new net.minecraft.network.chat.TextComponent(
-                        "Routerunner time model: " + RouterunnerConfig.timeModelLabel(cfg.timeModel) + " (from the next room plan)"), true);
-            }
-        }
 
         ClientLevel level = mc.level;
         Player player = mc.player;
@@ -70,6 +60,8 @@ public class ClientEvents {
             if (inVaultPrev) {
                 LookSampler.drainTo();
                 RouteService.reset();
+                com.routerunner.calib.PlayerCalibration.awaitIdle();
+                com.routerunner.calib.PlayerCalibration.save();
                 com.routerunner.adaptive.Adaptive.onVaultExit();
                 RunLog.pause("suspend");
                 RunLog.close();
@@ -88,7 +80,9 @@ public class ClientEvents {
         } else if (!inVault && inVaultPrev) {
             LookSampler.drainTo();
             RouteService.reset();
+            com.routerunner.calib.PlayerCalibration.awaitIdle();
             VaultGate.onVaultExit();
+            com.routerunner.calib.PlayerCalibration.save();
             com.routerunner.adaptive.Adaptive.onVaultExit();
             finalizeVault();
             logVaultExit();
@@ -116,6 +110,7 @@ public class ClientEvents {
                 } else {
                     RunLog.vaultEnter(vid, MetricsTracker.get().getLap());
                 }
+                if (resumed == null) com.routerunner.calib.LapRecorder.start();
                 com.routerunner.adaptive.Adaptive.onVaultEnter();
                 logSpeed(player);
             }
@@ -134,6 +129,7 @@ public class ClientEvents {
 
         boolean paused = mc.isPaused() || (mc.screen instanceof PauseScreen);
         MetricsTracker.get().advanceClock(paused);
+        if (loadedVaultId != null) com.routerunner.calib.LapRecorder.tick();
 
         TeleportDetector.update(player);
         RunLog.pos(player);
@@ -193,6 +189,7 @@ public class ClientEvents {
             s.activeMinutes = m.getActiveMs() / 60_000.0;
             s.modifiers = new ArrayList<>(lastModifiers);
             s.loot = LootListener.get().getItemTotals();
+            s.lapDetail = com.routerunner.calib.LapRecorder.finish();
             HistoryStore.append(s);
         } catch (Exception e) {
             LogUtils.getLogger().error("[Routerunner] failed to record vault summary", e);
@@ -263,6 +260,8 @@ public class ClientEvents {
         Minecraft mc = Minecraft.getInstance();
         if (!isInVault(mc.level)) return 0;
         MetricsTracker m = MetricsTracker.get();
+        com.routerunner.calib.PlayerCalibration.awaitIdle();
+        com.routerunner.calib.LapRecorder.closeLap();
         m.newLap();
         DensityTracker.reset();
         LootListener.get().reset();

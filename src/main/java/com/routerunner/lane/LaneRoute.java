@@ -457,6 +457,28 @@ public final class LaneRoute {
         return cur + 1 < runs.size() ? runs.get(cur + 1) : null;
     }
 
+    /** The planned walk in room-local cells: every lane's transition and lane cells, then the exit walk. */
+    public List<P> plannedPathLocal() {
+        List<P> out = new ArrayList<>();
+        for (LanePlanner.Lane e : plan.lanes) {
+            if (e.trans != null) out.addAll(e.trans);
+            if (e.cells != null) out.addAll(e.cells);
+        }
+        if (plan.exitPath != null) out.addAll(plan.exitPath);
+        return out;
+    }
+
+    /** The planned clicks in order, as the room-local chest each one targets: transition, lane, then exit triggers. */
+    public List<P> plannedClicksLocal() {
+        List<P> out = new ArrayList<>();
+        for (LanePlanner.Lane e : plan.lanes) {
+            if (e.transTriggers != null) for (LanePlanner.Trigger t : e.transTriggers) out.add(planner.chests.get(t.chest));
+            if (e.triggers != null) for (LanePlanner.Trigger t : e.triggers) out.add(planner.chests.get(t.chest));
+        }
+        for (LanePlanner.Trigger t : plan.exitTriggers) out.add(planner.chests.get(t.chest));
+        return out;
+    }
+
     public boolean finished() {
         return cur >= runs.size();
     }

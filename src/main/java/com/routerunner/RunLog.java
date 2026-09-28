@@ -2,7 +2,6 @@ package com.routerunner;
 
 import com.mojang.logging.LogUtils;
 import com.routerunner.solver.P;
-import com.routerunner.solver.RoutePlan;
 import com.routerunner.solver.RoutePlanner;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.entity.player.Player;
@@ -42,7 +41,7 @@ import java.util.stream.Stream;
 public final class RunLog {
     private static final Logger LOG = LogUtils.getLogger();
     /** Run-log format version, stamped on vault_enter. */
-    public static final int LOG_VERSION = 23;
+    public static final int LOG_VERSION = 25;
     private static final SimpleDateFormat FILE_FMT = new SimpleDateFormat("yyyyMMdd_HHmmss");
     /** Maximum events buffered before the vault id resolves. */
     private static final int BUFFER_CAP = 3000;
@@ -255,8 +254,8 @@ public final class RunLog {
     }
 
     /**
-     * The 20 Hz movement stream — one record per client tick. When a route is live and routing is shown, the
-     * follow-cursor state rides along so the planned and actual paths can be aligned.
+     * The 20 Hz movement stream — one record per client tick. When a lane route is live and routing is shown, the
+     * index of the run being followed ({@code run}) rides along so the planned and actual paths can be aligned.
      */
     public static synchronized void pos(Player player) {
         if (player == null) return;
@@ -277,11 +276,8 @@ public final class RunLog {
             if (TeleportDetector.teleportedThisTick()) sb.append(",\"tp\":true");
             RouteService.SolvedRoute sr = RouteService.current();
             if (sr != null && RouterunnerConfig.get().routingEnabled) {
-                sb.append(",\"cursor\":").append(sr.cursor).append(",\"wpTotal\":").append(sr.plan.waypoints.size());
-                if (sr.cursor < sr.plan.waypoints.size()) {
-                    P t = sr.plan.waypoints.get(sr.cursor).pos;
-                    sb.append(",\"target\":[").append(sr.ox + t.x()).append(',').append(sr.oy + t.y()).append(',').append(sr.oz + t.z()).append(']');
-                }
+                com.routerunner.lane.LaneRoute lr = sr.lane;
+                if (lr != null) sb.append(",\"run\":").append(lr.cur);
                 if (sr.roomId != null) sb.append(",\"roomId\":").append(quote(sr.roomId));
             }
             sb.append("}\n");
@@ -412,8 +408,10 @@ public final class RunLog {
                   .append(",\"lambda\":").append(r2(lr.pruneLambda))
                   .append(",\"tHit\":").append(r4(lr.pruneTHit))
                   .append(",\"groups\":").append(lr.prunedGroups)
-                  .append(",\"chests\":").append(lr.prunedChests).append('}')
-              .append(",\"runList\":[");
+                  .append(",\"chests\":").append(lr.prunedChests).append('}');
+            if (lr.plan.exitHop) sb.append(",\"exitHop\":true");
+            if (lr.plan.exitStraight) sb.append(",\"exitStraight\":true");
+            sb.append(",\"runList\":[");
             for (int i = 0; i < lr.runs.size(); i++) {
                 com.routerunner.lane.LaneRoute.Run r = lr.runs.get(i);
                 if (i > 0) sb.append(',');
@@ -498,12 +496,11 @@ public final class RunLog {
     }
 
     /**
-     * The solver finished a room: the full plan (waypoints, densified path, path modes — all ROOM-LOCAL) plus
-     * the exact weights it ran with, so the room can be re-scored offline against the {@code pos} stream.
+     * A room was planned: its snapshot (chests, grid, exit — all ROOM-LOCAL) and the settings it ran with, so the room
+     * can be re-planned offline against the {@code pos} stream. The lane plan itself is the {@code lane_plan} record.
      */
     public static synchronized void roomSolve(RouteService.SolvedRoute sr) {
         try {
-            RoutePlan plan = sr.plan;
             StringBuilder sb = head("room_solve", 4096);
             sb.append(",\"cellKey\":").append(quote(cellKey(sr.cellKey)))
               .append(",\"roomId\":").append(quote(sr.roomId))
@@ -521,31 +518,7 @@ public final class RunLog {
               .append(",\"slots\":").append(sr.grid == null ? 0 : sr.grid.slotCount())
               .append(",\"grid\":").append(gridObj(sr.grid))
               .append(",\"weights\":").append(sr.params.toJson())
-              .append(",\"plan\":{\"collected\":").append(plan.collected)
-              .append(",\"walkBlocks\":").append(r2(plan.walkBlocks))
-              .append(",\"flyBlocks\":").append(r2(plan.flyBlocks))
-              .append(",\"hotSpotRate\":").append(r4(plan.hotSpotRate))
-              .append(",\"waypoints\":[");
-            for (int i = 0; i < plan.waypoints.size(); i++) {
-                RoutePlan.WP wp = plan.waypoints.get(i);
-                if (i > 0) sb.append(',');
-                sb.append('[').append(wp.pos.x()).append(',').append(wp.pos.y()).append(',').append(wp.pos.z())
-                  .append(',').append(wp.plannedCleared)
-                  .append(',').append(segModeShort(wp.segMode))
-                  .append(',').append(wp.turnaround ? 1 : 0)
-                  .append(',').append(r2(wp.cumDist))
-                  .append(',').append(wp.pathIndex).append(']');
-            }
-            sb.append("],\"path\":[");
-            if (plan.path != null) {
-                for (int i = 0; i < plan.path.size(); i++) {
-                    P p = plan.path.get(i);
-                    if (i > 0) sb.append(',');
-                    sb.append('[').append(p.x()).append(',').append(p.y()).append(',').append(p.z()).append(']');
-                }
-            }
-            sb.append("],\"pathMode\":").append(quote(plan.pathMode == null ? "" : new String(plan.pathMode)))
-              .append("}}\n");
+              .append("}\n");
             write(sb.toString(), true);
         } catch (RuntimeException e) {
             LOG.error("[Routerunner] failed to log the solved route for {}; this room has no room_solve record.", sr.roomId, e);
@@ -565,108 +538,29 @@ public final class RunLog {
         write(sb.toString(), true);
     }
 
-    /** The follow-cursor passed a waypoint whose cluster is cleared. */
-    public static synchronized void reach(long cellKeyRaw, String roomId, String targetType, int index, BlockPos pos,
-                                          char segMode, double plannedDistance, int actualCleared,
-                                          int plannedCleared, long dtMs, int teleports) {
-        StringBuilder sb = head("reach", 320);
-        sb.append(",\"cellKey\":").append(quote(cellKey(cellKeyRaw)))
-          .append(",\"roomId\":").append(quote(roomId))
-          .append(",\"target\":").append(quote(targetType))
-          .append(",\"index\":").append(index)
-          .append(",\"pos\":[").append(pos.getX()).append(',').append(pos.getY()).append(',').append(pos.getZ()).append(']')
-          .append(",\"segment_mode\":").append(quote(segmentMode(segMode)))
-          .append(",\"planned_distance\":").append(r2(plannedDistance))
-          .append(",\"actual_cleared\":").append(actualCleared)
-          .append(",\"planned_cleared\":").append(plannedCleared)
-          .append(",\"dt_ms\":").append(dtMs)
-          .append(",\"tp\":").append(teleports)
-          .append("}\n");
-        write(sb.toString(), true);
-    }
-
-    /** The one-character segment mode a {@code room_solve} waypoint carries: w, d, s or t, quoted. */
-    private static String segModeShort(char mode) {
-        switch (mode) {
-            case 't': case 'd': case 's': case 'w': return "\"" + mode + "\"";
-            default:
-                LOG.error("[Routerunner] unknown waypoint segment mode '{}'; logging this waypoint as walk.", mode);
-                return "\"w\"";
-        }
-    }
-
-    /** The mode of the route segment leading into a waypoint, as the schema spells it. */
-    private static String segmentMode(char mode) {
-        switch (mode) {
-            case 't': return "trident";
-            case 'd': return "drop";
-            case 's': return "sprint";
-            case 'w': return "walk";
-            default:
-                LOG.error("[Routerunner] unknown route segment mode '{}'; logging this leg as walk.", mode);
-                return "walk";
-        }
-    }
-
     /**
-     * The cursor's trigger chest is gone but its cluster still has chests worth a detour, so the aim point moved
-     * to the nearest one. Written once per waypoint — the retarget itself is re-evaluated every tick.
+     * One room's you-vs-plan comparison, scored by the same walk-cost model. {@code cost} fields are model-blocks;
+     * {@code sec}/{@code chestsPerMin} are wall-clock ground truth. The ts/t bounds slice the {@code pos} and
+     * {@code break} streams back to exactly this room. The {@code solver} side is the room's lane plan (its drawn path
+     * and planned chests); without one, {@code solver}, {@code delta} and {@code follow} are null.
      *
-     * @param remaining target chests still standing in the waypoint's area
-     * @param goneFrac  fraction of the area's ORIGINAL chests already gone
-     */
-    public static synchronized void retarget(long cellKeyRaw, int index, int remaining, double goneFrac) {
-        StringBuilder sb = head("retarget", 200);
-        sb.append(",\"cellKey\":").append(quote(cellKey(cellKeyRaw)))
-          .append(",\"index\":").append(index)
-          .append(",\"remaining\":").append(remaining)
-          .append(",\"goneFrac\":").append(r4(goneFrac))
-          .append("}\n");
-        write(sb.toString(), true);
-    }
-
-    /**
-     * The follow-cursor passed a waypoint whose chest was never mined.
-     *
-     * @param reason why it was dropped: {@code missed} (flown past: behind you and receding), {@code spent}
-     *               (its cluster is mostly gone), {@code straggler} (trigger gone, only a mop-up left),
-     *               {@code chain} (a neighbour's chain cleared it), {@code forward} (the waypoints ahead are
-     *               already clear) or {@code stuck} (the area would not clear)
-     */
-    public static synchronized void skip(long cellKeyRaw, String roomId, String targetType, int index, BlockPos pos,
-                                         String reason) {
-        StringBuilder sb = head("skip", 224);
-        sb.append(",\"cellKey\":").append(quote(cellKey(cellKeyRaw)))
-          .append(",\"roomId\":").append(quote(roomId))
-          .append(",\"target\":").append(quote(targetType))
-          .append(",\"index\":").append(index)
-          .append(",\"pos\":[").append(pos.getX()).append(',').append(pos.getY()).append(',').append(pos.getZ()).append(']')
-          .append(",\"reason\":").append(quote(reason))
-          .append("}\n");
-        write(sb.toString(), true);
-    }
-
-    /**
-     * One room's you-vs-solver comparison, scored by the same walk-cost model. {@code cost} fields are
-     * model-blocks; {@code sec}/{@code chestsPerMin} are wall-clock ground truth. The ts/t bounds slice the
-     * {@code pos} and {@code break} streams back to exactly this room.
-     *
-     * @param user     {dist,turn,vert,clr,total} for the player's path (model-blocks)
-     * @param solver   {dist,turn,vert,clr,total} for the solver's WALK path (model-blocks)
-     * @param follow   {avgOff, maxOff, pctOver2} deviation of the player's path from the drawn route
-     * @param accuracy {n, rho, rhoNN, lift, spatial, score} order-prediction score, or null when unscorable
+     * @param user         {dist,turn,vert,clr,total} for the player's path (model-blocks)
+     * @param solver       {dist,turn,vert,clr,total} for the lane plan's drawn path, or null without a plan
+     * @param solverChests the lane plan's planned chests (0 without a plan)
+     * @param solverWalk   the lane plan's drawn path length (blocks)
+     * @param follow       {avgOff, maxOff, pctOver2} deviation of the player's path from the drawn route, or null
+     * @param accuracy     {n, rho, rhoNN, lift, spatial, score} order-prediction score, or null when unscorable
      */
     public static synchronized void roomDiff(RouteService.SolvedRoute room, int lap, boolean routing,
-                                             double sec, double[] user, double[] solver, double[] follow,
-                                             double[] accuracy) {
+                                             double sec, double[] user, double[] solver, int solverChests, double solverWalk,
+                                             double[] follow, double[] accuracy) {
         try {
             RoutePlanner.Params pm = room.params;
             int userChests = room.userChests;
-            int solverChests = room.plan.collected;
             double userMin = sec / 60.0;
             double userCpm = userMin > 0 ? userChests / userMin : 0;
             double userCostPerChest = userChests > 0 ? user[4] / userChests : 0;
-            double solverCostPerChest = solverChests > 0 ? solver[4] / solverChests : 0;
+            double solverCostPerChest = solver != null && solverChests > 0 ? solver[4] / solverChests : 0;
             StringBuilder sb = head("room_diff", 900);
             sb.append(",\"cellKey\":").append(quote(cellKey(room.cellKey)))
               .append(",\"roomId\":").append(quote(room.roomId))
@@ -689,17 +583,26 @@ public final class RunLog {
                   .append(",\"chestsPerMin\":").append(r1(userCpm))
                   .append(",\"costPerChest\":").append(r2(userCostPerChest))
                   .append(",\"model\":").append(modelObj(user)).append('}')
-              .append(",\"solver\":{\"chests\":").append(solverChests)
+              .append(",\"solver\":");
+            if (solver == null) {
+                sb.append("null,\"delta\":null");
+            } else {
+                sb.append("{\"chests\":").append(solverChests)
                   .append(",\"costPerChest\":").append(r2(solverCostPerChest))
-                  .append(",\"walkBlocks\":").append(r1(room.plan.walkBlocks))
-                  .append(",\"tridentBlocks\":").append(r1(room.plan.flyBlocks))
+                  .append(",\"walkBlocks\":").append(r1(solverWalk))
                   .append(",\"model\":").append(modelObj(solver)).append('}')
-              .append(",\"delta\":{\"total\":").append(r2(user[4] - solver[4]))
-                  .append(",\"costPerChest\":").append(r2(userCostPerChest - solverCostPerChest)).append('}')
-              .append(",\"follow\":{\"avgOff\":").append(r2(follow[0]))
+                  .append(",\"delta\":{\"total\":").append(r2(user[4] - solver[4]))
+                  .append(",\"costPerChest\":").append(r2(userCostPerChest - solverCostPerChest)).append('}');
+            }
+            sb.append(",\"follow\":");
+            if (follow == null) {
+                sb.append("null");
+            } else {
+                sb.append("{\"avgOff\":").append(r2(follow[0]))
                   .append(",\"maxOff\":").append(r2(follow[1]))
-                  .append(",\"pctOver2\":").append(r1(follow[2])).append('}')
-              .append(",\"accuracy\":").append(accuracyObj(accuracy));
+                  .append(",\"pctOver2\":").append(r1(follow[2])).append('}');
+            }
+            sb              .append(",\"accuracy\":").append(accuracyObj(accuracy));
             if (room.bigGroups != null) {
                 sb.append(",\"bigGroups\":{\"groups\":").append(room.bigGroups[0])
                   .append(",\"hit\":").append(room.bigGroups[1])
@@ -716,8 +619,7 @@ public final class RunLog {
 
     /**
      * The route service's human-readable status changed (solving, following, skipped, …). The caller
-     * throttles this to one record a second — the routing states carry the follow cursor, so they move
-     * every waypoint.
+     * throttles this to one record a second; the routing states carry the lane index, so they move every run.
      */
     public static synchronized void state(String state) {
         write(head("state", 128).append(",\"state\":").append(quote(state)).append("}\n").toString(), true);
@@ -737,7 +639,61 @@ public final class RunLog {
                 .append("}\n").toString(), true);
     }
 
-    /** The density gate passed this vault: the average target density over the first rooms and how many rooms it used. */
+    /**
+     * The room picker's exit for a room: {@code reason} solve/prefetch (the snapshot's exit) or switch (moved mid-room).
+     * Walls are W/E/N/S; {@code values} are each wall's path value in chests (null = the entrance or no door), absent
+     * when the exit is simply the door opposite the entrance. {@code neigh} are the four neighbouring rooms' target
+     * chest counts (W, E, N, S; -1 = not loaded when asked), {@code unknown} how many candidate exits led to an
+     * unloaded room, {@code lambda} the planned chest rate the values are priced at.
+     */
+    public static synchronized void roomPick(long cellKeyRaw, String reason, int entryWall, int exitWall, RoomPicker.Decision d,
+                                             int[] neigh, double lambda) {
+        StringBuilder sb = head("room_pick", 256);
+        sb.append(",\"cellKey\":").append(quote(cellKey(cellKeyRaw)))
+          .append(",\"reason\":").append(quote(reason))
+          .append(",\"entry\":").append(quote(entryWall < 0 ? "?" : RoomPicker.WALL_NAMES[entryWall]))
+          .append(",\"exit\":").append(quote(exitWall < 0 ? "?" : RoomPicker.WALL_NAMES[exitWall]))
+          .append(",\"picked\":").append(d != null);
+        if (d != null) {
+            sb.append(",\"values\":[");
+            for (int w = 0; w < 4; w++) {
+                if (w > 0) sb.append(',');
+                double v = d.values()[w];
+                sb.append(Double.isNaN(v) ? "null" : r1(v));
+            }
+            sb.append("],\"unknown\":").append(d.unknownNeighbours()).append(",\"planned\":").append(d.plannedNeighbours())
+              .append(",\"seen\":").append(d.seenRooms());
+            if (d.fallback()) sb.append(",\"fallback\":true");
+        }
+        sb.append(",\"neigh\":[").append(neigh[0]).append(',').append(neigh[1]).append(',').append(neigh[2]).append(',').append(neigh[3]).append(']')
+          .append(",\"lambda\":").append(Double.isNaN(lambda) ? "null" : r2(lambda))
+          .append("}\n");
+        write(sb.toString(), true);
+    }
+
+    /** The density gate passed this vault: the qualifying room's chest count (any type) and the room count it used (1). */
+    /**
+     * One room measured for the player calibration (research/2026-09-28_player_calib): idle-free real seconds, idle,
+     * the shape price of the player's own trail and hits, the benchmark seconds for it, clumpiness, chests broken, the
+     * benchmark plan (chests, seconds) the lap predictions use, whether the drawn route was followed, the switch into
+     * the room, and the player's pace after it (not yet counted while the density gate is undecided).
+     */
+    public static synchronized void playerCalib(long cellKeyRaw, com.routerunner.calib.PlayerCalibration.Room m, double benchS, double pace) {
+        write(head("player_calib", 320).append(",\"cellKey\":").append(quote(cellKey(cellKeyRaw)))
+                .append(",\"vein\":").append(m.vein())
+                .append(",\"realS\":").append(r2(m.realS()))
+                .append(",\"idleS\":").append(r2(m.idleS()))
+                .append(",\"pricedS\":").append(r2(m.pricedS()))
+                .append(",\"benchS\":").append(r2(benchS))
+                .append(",\"clump\":").append(r1(m.clump()))
+                .append(",\"chests\":").append(m.chests())
+                .append(",\"planYield\":").append(r1(m.planYield()))
+                .append(",\"planS\":").append(r2(m.planS()))
+                .append(",\"followed\":").append(m.followed())
+                .append(",\"switchS\":").append(r2(m.switchS()))
+                .append(",\"pace\":").append(r4(pace)).append("}\n").toString(), false);
+    }
+
     public static synchronized void densityGate(double density, int rooms, double threshold) {
         write(head("density_gate", 128).append(",\"density\":").append(r1(density)).append(",\"rooms\":").append(rooms)
                 .append(",\"threshold\":").append(r1(threshold)).append(",\"pass\":true}\n").toString(), true);
@@ -1001,7 +957,7 @@ public final class RunLog {
         return sb.append(']').toString();
     }
 
-    /** The room's route-accuracy score, or a JSON null when too few planned waypoints matched your breaks. */
+    /** The room's route-accuracy score, or a JSON null when too few planned clicks matched your breaks. */
     private static String accuracyObj(double[] a) {
         if (a == null) return "null";
         if (a.length < 6) {

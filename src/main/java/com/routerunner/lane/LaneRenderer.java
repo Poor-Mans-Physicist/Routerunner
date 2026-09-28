@@ -10,6 +10,8 @@ import com.mojang.math.Matrix4f;
 import com.routerunner.RouteService;
 import com.routerunner.Routerunner;
 import com.routerunner.RouterunnerConfig;
+import com.routerunner.Visuals;
+import com.routerunner.Visuals.Element;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.core.BlockPos;
@@ -96,6 +98,17 @@ public final class LaneRenderer {
         float[] hot = cur.exit ? EXIT_HOT : (corridor ? CORRIDOR_HOT : POINT_HOT);
         int prog = Math.min(Math.max(lr.prog, 0), Math.max(cur.poly.size() - 1, 0));
         double bob = 0.15 * Math.sin(System.currentTimeMillis() / 250.0);
+        float aCarpet = Visuals.alpha(Element.LANE_CARPET);
+        float aNextCarpet = Visuals.alpha(Element.LANE_NEXT_CARPET);
+        float aLine = Visuals.alpha(Element.LANE_LINE);
+        float aNextLine = Visuals.alpha(Element.LANE_NEXT_LINE);
+        float aShaft = Visuals.alpha(Element.LANE_SHAFT_ARROWS);
+        float aUturn = Visuals.alpha(Element.LANE_UTURN);
+        float aTracer = Visuals.alpha(Element.LANE_TRACER);
+        float aHeat = Visuals.alpha(Element.HEATMAP);
+        float aHeatNext = Visuals.alpha(Element.HEATMAP_NEXT);
+        float aTarget = Visuals.alpha(Element.TARGET_OUTLINES);
+        float aPriority = Visuals.alpha(Element.PRIORITY_OUTLINES);
 
         Vec3 cam = mc.gameRenderer.getMainCamera().getPosition();
         PoseStack ps = event.getPoseStack();
@@ -113,34 +126,34 @@ public final class LaneRenderer {
 
         RenderSystem.enableDepthTest();
         buf.begin(VertexFormat.Mode.QUADS, DefaultVertexFormat.POSITION_COLOR);
-        if (next != null) carpet(buf, mat, next.carpet, null, NEXT_COL, 0.14f, -1, -1, null);
-        carpet(buf, mat, cur.carpet, cur.carpetIdx, base, 0.28f, prog, hotEndIndex(cur.poly, prog), hot);
+        if (next != null && aNextCarpet > 0f) carpet(buf, mat, next.carpet, null, NEXT_COL, 0.14f * aNextCarpet, -1, -1, null, aNextCarpet);
+        if (aCarpet > 0f) carpet(buf, mat, cur.carpet, cur.carpetIdx, base, 0.28f * aCarpet, prog, hotEndIndex(cur.poly, prog), hot, aCarpet);
         tess.end();
 
         RenderSystem.disableDepthTest();
         buf.begin(VertexFormat.Mode.QUADS, DefaultVertexFormat.POSITION_COLOR);
         if (next != null) {
-            plainLine(buf, mat, next.poly, NEXT_COL, 0.35f, LINE_HALF, false);
-            for (LaneRoute.Shaft s : next.shafts) arrow(buf, mat, s, 0.35f, bob);
+            if (aNextLine > 0f) plainLine(buf, mat, next.poly, NEXT_COL, 0.35f * aNextLine, LINE_HALF, false);
+            if (aShaft > 0f) for (LaneRoute.Shaft s : next.shafts) arrow(buf, mat, s, 0.35f * aShaft, bob);
         }
-        progressLine(buf, mat, cur.poly, prog, base, hot);
-        for (LaneRoute.Shaft s : cur.shafts) arrow(buf, mat, s, 0.85f, bob);
-        if (cur.uturn && cur.uturnIn != null && !cur.poly.isEmpty()) {
+        if (aLine > 0f) progressLine(buf, mat, cur.poly, prog, base, hot, aLine);
+        if (aShaft > 0f) for (LaneRoute.Shaft s : cur.shafts) arrow(buf, mat, s, 0.85f * aShaft, bob);
+        if (aUturn > 0f && cur.uturn && cur.uturnIn != null && !cur.poly.isEmpty()) {
             BlockPos j = cur.poly.get(cur.poly.size() - 1);
             boolean near = Math.sqrt(j.distToCenterSqr(mc.player.getX(), mc.player.getY(), mc.player.getZ())) <= UTURN_NEAR;
-            uturn(buf, mat, j, cur.uturnIn, cur.uturnSide, near ? 0.95f : 0.45f);
+            uturn(buf, mat, j, cur.uturnIn, cur.uturnSide, (near ? 0.95f : 0.45f) * aUturn);
         }
         List<BlockPos> tracer = lr.tracer;
-        if (lr.offLane && tracer != null && tracer.size() > 1) {
-            plainLine(buf, mat, tracer, TRACER_COL, 0.9f, LINE_HALF_TRACER, false);
-            for (LaneRoute.Shaft s : lr.tracerShafts) arrow(buf, mat, s, 0.85f, bob);
+        if (aTracer > 0f && lr.offLane && tracer != null && tracer.size() > 1) {
+            plainLine(buf, mat, tracer, TRACER_COL, 0.9f * aTracer, LINE_HALF_TRACER, false);
+            for (LaneRoute.Shaft s : lr.tracerShafts) arrow(buf, mat, s, 0.85f * aTracer, bob);
         }
         Vec3 pp = mc.player.position();
-        heatBoxes(buf, mat, lr.heatNext, pp, 0.45f);
-        heatBoxes(buf, mat, lr.heat, pp, 1.0f);
+        if (aHeatNext > 0f) heatBoxes(buf, mat, lr.heatNext, pp, 0.45f * aHeatNext);
+        if (aHeat > 0f) heatBoxes(buf, mat, lr.heat, pp, aHeat);
         java.util.Set<BlockPos> prio = lr.priorityTargets;
-        for (BlockPos b : lr.targets) if (!prio.contains(b)) wire(buf, mat, b, TARGET_COL, 0.95f, TARGET_HALF);
-        for (BlockPos b : prio) wire(buf, mat, b, PRIORITY_COL, 1.0f, PRIORITY_HALF);
+        if (aTarget > 0f) for (BlockPos b : lr.targets) if (!prio.contains(b)) wire(buf, mat, b, TARGET_COL, 0.95f * aTarget, TARGET_HALF);
+        if (aPriority > 0f) for (BlockPos b : prio) wire(buf, mat, b, PRIORITY_COL, aPriority, PRIORITY_HALF);
         tess.end();
 
         RenderSystem.depthMask(true);
@@ -213,18 +226,18 @@ public final class LaneRenderer {
 
     /**
      * Floor carpet: cells generated by polyline points inside [from, to] are drawn in the hot colour, cells already
-     * behind the pointer dimmer, the rest in the base colour.
+     * behind the pointer dimmer, the rest in the base colour; {@code fade} scales the hot and walked alphas.
      */
     private static void carpet(BufferBuilder buf, Matrix4f mat, List<BlockPos> cells, List<Integer> idx, float[] c, float a,
-                               int from, int to, float[] hot) {
+                               int from, int to, float[] hot, float fade) {
         for (int i = 0; i < cells.size(); i++) {
             BlockPos b = cells.get(i);
             float[] col = c;
             float alpha = a;
             if (idx != null && hot != null) {
                 int j = idx.get(i);
-                if (j >= from && j <= to) { col = hot; alpha = 0.55f; }
-                else if (j < from) alpha = 0.16f;
+                if (j >= from && j <= to) { col = hot; alpha = 0.55f * fade; }
+                else if (j < from) alpha = 0.16f * fade;
             }
             float x = b.getX(), y = b.getY() + CARPET_LIFT, z = b.getZ();
             quad(buf, mat, x, y, z, x + 1, y, z, x + 1, y, z + 1, x, y, z + 1, col, alpha);
@@ -242,7 +255,7 @@ public final class LaneRenderer {
     }
 
     /** The current run: dim behind the pointer, vivid and wide with chevrons for the highlight window, normal beyond. */
-    private static void progressLine(BufferBuilder buf, Matrix4f mat, List<BlockPos> poly, int prog, float[] base, float[] hot) {
+    private static void progressLine(BufferBuilder buf, Matrix4f mat, List<BlockPos> poly, int prog, float[] base, float[] hot, float fade) {
         if (poly.size() < 2) return;
         double[] cum = new double[poly.size()];
         for (int i = 1; i < poly.size(); i++) {
@@ -262,7 +275,7 @@ public final class LaneRenderer {
             else if (mid <= hotEnd) { col = hot; a = 1.0f; half = LINE_HALF_HOT; chev = true; }
             else { col = base; a = 0.60f; half = LINE_HALF; chev = false; }
             if (LaneRoute.segKind(p, q) != LaneRoute.SEG_FLAT) col = SHAFT_COL;
-            acc = segment(buf, mat, p, q, col, a, half, chev, acc);
+            acc = segment(buf, mat, p, q, col, a * fade, half, chev, acc);
         }
     }
 

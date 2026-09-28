@@ -15,7 +15,6 @@ public class ClientSetup {
     public static void onClientSetup(FMLClientSetupEvent event) {
         event.enqueueWork(() -> {
             ClientRegistry.registerKeyBinding(KeyBindings.OPEN_MENU);
-            ClientRegistry.registerKeyBinding(KeyBindings.TOGGLE_TIME_MODEL);
         });
         OverlayRegistry.registerOverlayTop("Routerunner HUD", RouterunnerHud.INSTANCE);
 

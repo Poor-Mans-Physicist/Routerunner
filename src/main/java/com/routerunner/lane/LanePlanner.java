@@ -126,6 +126,8 @@ public final class LanePlanner {
         public double cover;
         public List<P> exitPath;
         public boolean exitStraight;
+        /** The exit was only reachable by a warp: a walk to a take-off cell and a hop out (or a wide flight). */
+        public boolean exitHop;
         public List<Trigger> exitTriggers = new ArrayList<>();
         public List<double[]> ghost = new ArrayList<>();
         public List<Object[]> clears = new ArrayList<>();
@@ -294,6 +296,7 @@ public final class LanePlanner {
         List<int[]> runs;
         List<int[]> exitPath;
         boolean exitStraight;
+        boolean exitHop;
         double tTotal, tExit, bail, opportunity, cover;
         int yieldTotal, nCorridors;
         com.google.gson.JsonArray exitTrig;
@@ -376,6 +379,7 @@ public final class LanePlanner {
         for (int ri = 0; ri < plan.runs.size(); ri++) for (int k : plan.runs.get(ri)) if (k >= 0 && k < plan.lanes.size()) plan.lanes.get(k).run = ri;
         plan.exitPath = np.exitPath == null ? null : cellList(np.exitPath);
         plan.exitStraight = np.exitStraight;
+        plan.exitHop = np.exitHop;
         plan.tTotal = np.tTotal;
         plan.tExit = np.tExit;
         plan.bail = np.bail;
@@ -708,6 +712,73 @@ public final class LanePlanner {
     /** The forward walkable component from a position, cached per cell for the plan's lifetime. */
     private Set<Long> reachableFrom(P pos) {
         return componentCache.computeIfAbsent(ckey(pos), k -> Grid.reachable(grid, pos));
+    }
+
+    /** Take-off cells tried by the exit safety net, nearest the exit first. */
+    static final int EXIT_TAKEOFFS = 48;
+    /** Take-off cells sampled evenly from the rest of the walkable component when the nearest ones find no hop. */
+    static final int EXIT_WIDE_TAKEOFFS = 1024;
+    /** Hops of the wide flight tried when no single take-off hop reaches the exit. */
+    static final int EXIT_WIDE_HOPS = 5;
+
+    /**
+     * The exit safety net, used only when neither a walk nor a 3-hop flight reaches the exit (a sunken or roofed part
+     * of the room with no way up on foot): walk to one of the {@link #EXIT_TAKEOFFS} reachable cells nearest the exit
+     * (ties: higher, then lower x, then lower z), warp to a landing in its line of sight from which the exit can be
+     * walked, then walk out. When none of those has such a landing (the cells nearest the exit can sit under the very
+     * ledge that blocks it), up to {@link #EXIT_WIDE_TAKEOFFS} of the remaining reachable cells, evenly spaced in that
+     * order, are tried. The cheapest take-off / landing pair wins (straight distance to the take-off, the hop, the
+     * hop's length and the walk out). Null when no pair works. Mirrors the native {@code take_off_exit}.
+     */
+    private List<P> takeOffExit(P a, P b) {
+        if (exitField == null) return null;
+        java.util.Set<Long> reach = Grid.reachable(grid, a);
+        List<P> cand = new ArrayList<>();
+        for (int x = 0; x < grid.sx; x++) {
+            for (int y = 0; y < grid.sy; y++) {
+                for (int z = 0; z < grid.sz; z++) {
+                    P c = new P(x, y, z);
+                    if (reach.contains(Grid.cellKey(c))) cand.add(c);
+                }
+            }
+        }
+        cand.sort((u, v) -> {
+            int k = Double.compare(Grid.dist(u, b), Grid.dist(v, b));
+            if (k != 0) return k;
+            if (u.y() != v.y()) return Integer.compare(v.y(), u.y());
+            if (u.x() != v.x()) return Integer.compare(u.x(), v.x());
+            return Integer.compare(u.z(), v.z());
+        });
+        double bestC = Double.POSITIVE_INFINITY;
+        P bestT = null, bestL = null;
+        int near = Math.min(EXIT_TAKEOFFS, cand.size());
+        int rest = cand.size() - near;
+        int stride = Math.max(1, (rest + EXIT_WIDE_TAKEOFFS - 1) / EXIT_WIDE_TAKEOFFS);
+        for (int pass = 0; pass < 2 && bestT == null; pass++) {
+            int from = pass == 0 ? 0 : near, to = pass == 0 ? near : cand.size(), step = pass == 0 ? 1 : stride;
+            for (int i = from; i < to; i += step) {
+                P t = cand.get(i);
+                double base = Grid.dist(a, t) + Grid.HOP_COST;
+                for (P l : pass == 0 ? landingsFrom(t) : Grid.landings(grid, t)) {
+                    Double w = exitField.get(Grid.cellKey(l));
+                    if (w == null || w.isNaN()) continue;
+                    double cost = base + Grid.FLIGHT_COST_PER_BLOCK * Grid.dist(t, l) + w;
+                    if (bestT == null || cost < bestC) {
+                        bestC = cost;
+                        bestT = t;
+                        bestL = l;
+                    }
+                }
+            }
+        }
+        if (bestT == null) return null;
+        List<P> toT = Grid.astar(grid, a, bestT, null);
+        if (toT == null) return null;
+        List<P> out = Grid.astar(grid, bestL, b, null);
+        if (out == null) return null;
+        List<P> all = new ArrayList<>(toT);
+        all.addAll(out);
+        return all;
     }
 
     /** The flight landings visible from a position, cached per cell for the plan's lifetime. */
@@ -1121,6 +1192,11 @@ public final class LanePlanner {
         if (exitPath == null && P.allowFly) {
             exitPath = Grid.flight(grid, st.pos, exit, this::landingsFrom, 3);
             if (exitPath == null) {
+                exitPath = takeOffExit(st.pos, exit);
+                if (exitPath == null) exitPath = Grid.flight(grid, st.pos, exit, this::landingsFrom, EXIT_WIDE_HOPS);
+                if (exitPath != null) plan.exitHop = true;
+            }
+            if (exitPath == null) {
                 exitPath = new ArrayList<>();
                 exitPath.add(st.pos);
                 exitPath.add(exit);
@@ -1359,6 +1435,7 @@ public final class LanePlanner {
         if (plan.exitPath != null) for (P c : plan.exitPath) exitW.add(new int[]{c.x() + ox, c.y() + oy, c.z() + oz});
         out.put("exitPath", exitW);
         out.put("exitStraight", plan.exitStraight);
+        out.put("exitHop", plan.exitHop);
         out.put("runs", runs);
         out.put("ghost", ghost);
         out.put("clears", clears);

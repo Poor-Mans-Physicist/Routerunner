@@ -18,7 +18,7 @@ import java.util.List;
 /** Append-only, uncapped history of completed vaults at config/routerunner/history.json. */
 public final class HistoryStore {
     private static final Logger LOG = LogUtils.getLogger();
-    private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
+    private static final Gson GSON = new GsonBuilder().setPrettyPrinting().serializeSpecialFloatingPointValues().create();
     private static final Type LIST_TYPE = new TypeToken<List<VaultSummary>>() {}.getType();
 
     private static Path file() {
