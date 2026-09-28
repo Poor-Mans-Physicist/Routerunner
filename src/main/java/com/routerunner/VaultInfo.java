@@ -34,11 +34,43 @@ public final class VaultInfo {
                 Modifiers mods = v.get(Vault.MODIFIERS);
                 var group = mods.getDisplayGroup();
                 for (var modifier : group.keySet()) {
-                    out.add(group.getInt(modifier) + "x " + modifier.getDisplayName());
+                    out.add(group.getInt(modifier) + "x " + label(modifier));
                 }
             }
             return out;
         }).orElseGet(ArrayList::new);
+    }
+
+    private static final java.util.regex.Pattern PERCENT = java.util.regex.Pattern.compile("\\+?(\\d+(?:\\.\\d+)?)%");
+    private static boolean labelErrorLogged = false;
+
+    /**
+     * A modifier's name for the logs and the history. The map cascades ({@code soul_cascade_living} and its gilded and
+     * ornate twins, +1 % each) share the display name of the +25 % crystal cascades ("Living"); they are written as
+     * "1% Living (Map)", the percentage taken from the modifier's own formatted description.
+     */
+    static String label(iskallia.vault.core.vault.modifier.spi.VaultModifier<?> modifier) {
+        String name = modifier.getDisplayName();
+        try {
+            ResourceLocation id = modifier.getId();
+            if (id == null || !id.getPath().startsWith("soul_cascade_")) return name;
+            String pct = "1";
+            String desc = modifier.getDisplayDescriptionFormatted(1);
+            java.util.regex.Matcher m = desc == null ? null : PERCENT.matcher(desc);
+            if (m != null && m.find()) {
+                pct = m.group(1);
+            } else if (!labelErrorLogged) {
+                labelErrorLogged = true;
+                com.mojang.logging.LogUtils.getLogger().error("[Routerunner] map cascade {} has no percentage in its description \"{}\"; labelling it 1%.", id, desc);
+            }
+            return pct + "% " + name + " (Map)";
+        } catch (Throwable t) {
+            if (!labelErrorLogged) {
+                labelErrorLogged = true;
+                com.mojang.logging.LogUtils.getLogger().error("[Routerunner] could not read a modifier's id; logging it by display name only.", t);
+            }
+            return name;
+        }
     }
 
     /**
