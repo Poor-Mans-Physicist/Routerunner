@@ -1,25 +1,31 @@
 # Routerunner
 
 A client-side Forge mod for [Wold's Vaults](https://www.curseforge.com/minecraft/modpacks/wolds-vaults) (Minecraft 1.18.2)
-that helps you loot more chests per minute in vaults.
+that helps you loot more chests per minute in vaults. It is designed to be fully game legal, using only information that 
+one gets from using treasure goggles and high AoE to compute the best way to loot a chest vault. 
 
-- **Live metrics HUD.** The lap's active time, total chests broken, average chests/min (overall and with pauses
-  excluded), a sliding 1 minute average that turns green or red when it runs more than 25 chests/min above or below the
-  lap's active average, and per-chest-type loot rates. A room density readout is available as a debug aid (off by
-  default).
-- **Lane route.** A planner solves each room as you enter it, and draws the route on the floor: a chain of short runs
-  through the densest chests, a heat map over the chests to mine, green markers on the next target cluster, purple
-  arrows for dashes, and a green exit path when the room becomes sparse enough to not be worth looting further.
-  It supports both Chain Miner and Vein Miner; the overlays are slightly different depending on which you use, and
-  Vein Miner is generally preferable in very large vaults with over 90 total chest-improving modifiers.
-- **Next room.** The adaptive room picker leaves each room by the door toward the best unvisited rooms around it,
-  using the loaded rooms' chest counts and the vault's chunk-alignment pattern. Challenge rooms that lock you in only
-  get the way out drawn, and the labyrinth is never routed into.
-- **Your speed.** Routes are priced move by move (runs, turns, climbs, clicks) with timings measured on the author's
-  play, then scaled to you: every room you loot, the path you actually walked is priced the same way and compared
-  with your real time, so the planner learns how fast you are without penalising you for leaving the route.
-- **Vault history.** Every vault you finish is saved with its chest count, rates, modifiers and loot totals, and, per
-  lap, charts of your chests/min against your own predicted pace and the author's benchmark on the same rooms.
+- **Live metrics HUD.** Allows the player to see their real time chests/minute metrics on their HUD for chest vaults, 
+including active averages, total averages, and the time elapsed in vault. It also shows the average loot/minute you get for a few
+key items per chest type, like vault diamonds and knowledge essence.
+
+- **Lane route.** The main feature of the mod – by using an internal solver, Routerunner is able to compute the supposedly
+optimal path to loot a room, targeting the maximum chests/minute number possible. This route is displayed to the player via colorful
+lanes and chest highlights on the screen, and has several different routing models possible to choose from if you don't like the way one plays.
+For best results, try to follow the route to the best of your ability – the route is smart, and even though it looks like it's passing a juicy
+group of chests that you really want to mine, the planner knows best, and if it doesn't want you to loot that group it generally has a good reason.
+Has QoL settings to change the brightness/what is rendered for the route, and the route can be disabled or enabled at any time. 
+
+- **Next room.** An adaptive room picker looks at the hunter data from surrounding rooms, combined with research into how the vault generates chests,
+to show you what rooms to visit next. It doesn't double back on itself and tries to avoid other players, and while following the rooms it wants you to
+go to, you'll see on average 10-15% higher chest densities than you would otherwise.
+
+- **Your speed.** The router is able to automatically sense and adapt to your looting speed, providing projections on chests/minute and routes
+based on your movement speed, which it constantly samples and updates as a vault progresses. 
+
+- **Vault history.** After every vault, you have the option to view your past vaults in detail, including the modifiers on them, the total chests you mined, 
+moving chest/minute averages across the vault, and your general performance compared to what the router projected you would get, and the internal benchmark 
+set from training data on what is considered a cutting edge looting speed. 
+
 - **Run logs.** Each vault writes a `vault_*.jsonl` file with the planned routes, your path, every chest break and the
   per-room comparison of your run with the reference solver's, which is what the planner's timing model is fitted on.
 
