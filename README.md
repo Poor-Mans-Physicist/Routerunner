@@ -53,8 +53,8 @@ Press **`[`** to open the menu. You can rebind it under Options → Controls →
 
 | Button | What it does |
 | --- | --- |
-| Routing... | Next room (Adaptive / Straight), the target arrow, your measured speed per miner with its reset, and the Learned model's adaptive learning with its reset. |
-| Visuals and QoL... | Opacity sliders for everything Routerunner draws (a master slider plus one per element; 0 % hides it), the Vault Mapper axis lines and the Hunter box toggle. |
+| Routing... | Next room (Adaptive / Straight), the target arrow, enigma chest routing (off by default) with its value slider (1 to 100 chests, default 10), your measured speed per miner with its reset, and the Learned model's adaptive learning with its reset. |
+| Visuals and QoL... | Opacity sliders for everything Routerunner draws (a master slider plus one per element; 0 % hides it), the Vault Mapper axis lines, the Hunter box toggle and the enigma chest outlines (red and purple, on by default). |
 | HUD Layout | Drag the readouts and the loot panel wherever you want. Toggles along the bottom show or hide each one. |
 | Past Vaults | Your finished vaults, newest first. Click one for its laps; click a lap for its charts: **Actual** (what you got over the rooms you looted, idle removed), **Your Pace** (what the same room plans predict at your measured speed) and **Benchmark** (the author on the same plans), plus room density and clumpiness. |
 | Data and Logs... | Run log: Gated (only vaults with a 150+ chest room keep their log) or Always, and the log folder. |

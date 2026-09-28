@@ -277,9 +277,23 @@ impl Planner {
         p: Params,
         model: LegTimeModel,
     ) -> Planner {
+        Planner::new_solo(g, chests, Vec::new(), chain_range, chain_limit, p, model)
+    }
+
+    /// A planner where `solo[i] > 0` marks chest i as a solo target (an enigma chest): never chained
+    /// to or from, worth `solo[i]` chests in every yield and rate. Empty: ordinary targets only.
+    pub fn new_solo(
+        g: SolidGrid,
+        chests: Vec<P>,
+        solo: Vec<i32>,
+        chain_range: i32,
+        chain_limit: i32,
+        p: Params,
+        model: LegTimeModel,
+    ) -> Planner {
         let n = g.len();
         let nc = chests.len();
-        let chain = ChainModel::new(chain_range, chain_limit, &chests);
+        let chain = ChainModel::new_solo(chain_range, chain_limit, &chests, solo);
         let chest_buckets = Buckets::build(&chests, 5, true);
         let succ = grid::SuccTable::build(&g);
         let mut room = Room {
@@ -411,8 +425,9 @@ fn live_reach(r: &Room, rc: &mut ReachCache, cell: P, remaining: &[bool]) -> i32
     let (o, l) = ensure_reach(r, rc, cell);
     let mut n = 0;
     for k in o..o + l {
-        if remaining[rc.arena[k as usize] as usize] {
-            n += 1;
+        let i = rc.arena[k as usize] as usize;
+        if remaining[i] {
+            n += r.chain.value(i);
         }
     }
     n
@@ -439,8 +454,8 @@ fn sweep(r: &Room, c: &mut Cache, cells: &[P], remaining: &mut [bool], triggers:
             let cl = r.chain.clear_from(best as u32, remaining, cs);
             for &j in &cl {
                 remaining[j as usize] = false;
+                total += r.chain.value(j as usize);
             }
-            total += cl.len() as i32;
             triggers.push(Trigger { cell, chest: best as u32, cleared: cl });
         }
     }
@@ -1623,7 +1638,7 @@ fn plan_impl(r: &Room, c: &mut Cache, entrance: P, exit: P, remaining_in: Vec<bo
             *v = f64::NAN;
         }
     }
-    let live = remaining_in.iter().filter(|b| **b).count() as i32;
+    let live: i32 = (0..remaining_in.len()).filter(|&i| remaining_in[i]).map(|i| r.chain.value(i)).sum();
     let mut remaining = remaining_in.clone();
     let mut st = State { pos: entrance, heading: None, prev_burst: 0, back: Vec::new(), since_trig: SHAPE_NO_TRIG };
     let mut plan = Plan { n_corridors: r.corridors.len(), ..Default::default() };

@@ -51,7 +51,9 @@ public class HelpScreen extends Screen {
         "",
         "§eAdaptive learning§r (§eRouting§r menu, Learned time model only): the planner starts from timings fitted on the author's runs and adjusts them to you as you play — your pace, your seconds per chain burst, and how long each kind of leg takes you. Saved in §fconfig/routerunner/adaptive/§r; §eReset Adaptive Model§r forgets it. Off plans with the bundled timings and learns nothing.",
         "",
-        "§eVisuals and QoL§r (config menu): an opacity slider for every drawn element and HUD readout, plus a master slider. 0 % hides that element; the route is still planned and followed. Also the Vault Mapper axis lines and the Hunter box toggle.",
+        "§eVisuals and QoL§r (config menu): an opacity slider for every drawn element and HUD readout, plus a master slider. 0 % hides that element; the route is still planned and followed. Also the Vault Mapper axis lines, the Hunter box toggle and the §cenigma§r §dchest§r outlines.",
+        "",
+        "§eEnigma chests§r are rare and only spawn in mapped vaults; they are outlined in red and purple (Visuals and QoL). In §eRouting§r, §eEnigma chests: Routed§r has the planner collect them with the room's chests. Neither miner chains to or from one, so each is its own click, worth the §eEnigma value§r slider in ordinary chests (default 10).",
         "",
         "§eSparse vaults§r (no room entered with 150+ chests of any type) keep no run log and teach nothing, unless §eRun log: Always§r is set in §eData and Logs§r (learning still needs such a room). Once the runs folder passes 500 MB the oldest logs are deleted (§frunLogCap§r in config.json turns that off).",
     };

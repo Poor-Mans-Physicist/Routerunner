@@ -53,13 +53,55 @@ pub extern "system" fn Java_com_routerunner_lane_NativeLane_create(
     chain_limit: jint,
     model: JDoubleArray,
 ) -> jlong {
+    build(&mut env, sx, sy, sz, &solid_bits, &chests, chain_range, chain_limit, &model, None)
+}
+
+/// `create` with solo targets: `solo[i] > 0` marks chest i as never chained, worth that many chests.
+#[no_mangle]
+#[allow(non_snake_case)]
+pub extern "system" fn Java_com_routerunner_lane_NativeLane_createSolo(
+    mut env: JNIEnv,
+    _class: JClass,
+    sx: jint,
+    sy: jint,
+    sz: jint,
+    solid_bits: JByteArray,
+    chests: JIntArray,
+    chain_range: jint,
+    chain_limit: jint,
+    model: JDoubleArray,
+    solo: JIntArray,
+) -> jlong {
+    build(&mut env, sx, sy, sz, &solid_bits, &chests, chain_range, chain_limit, &model, Some(&solo))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build(
+    env: &mut JNIEnv,
+    sx: jint,
+    sy: jint,
+    sz: jint,
+    solid_bits: &JByteArray,
+    chests: &JIntArray,
+    chain_range: jint,
+    chain_limit: jint,
+    model: &JDoubleArray,
+    solo: Option<&JIntArray>,
+) -> jlong {
     let r = catch_unwind(AssertUnwindSafe(|| -> Option<jlong> {
         if sx <= 0 || sy <= 0 || sz <= 0 {
             return None;
         }
-        let bits = env.convert_byte_array(&solid_bits).ok()?;
-        let cv = read_ints(&mut env, &chests)?;
-        let mv = read_doubles(&mut env, &model)?;
+        let bits = env.convert_byte_array(solid_bits).ok()?;
+        let cv = read_ints(env, chests)?;
+        let mv = read_doubles(env, model)?;
+        let sv = match solo {
+            Some(a) => read_ints(env, a)?,
+            None => Vec::new(),
+        };
+        if !sv.is_empty() && sv.len() * 3 != cv.len() {
+            return None;
+        }
         if mv.len() < 37 || cv.len() % 3 != 0 {
             return None;
         }
@@ -95,7 +137,7 @@ pub extern "system" fn Java_com_routerunner_lane_NativeLane_create(
             lm.shape = Some(mv[43..43 + crate::model::SHAPE_N].to_vec());
         }
         let boot = Params { point_mode: true, ..Params::default() };
-        let p = Planner::new(g, pts, chain_range, chain_limit, boot, lm);
+        let p = Planner::new_solo(g, pts, sv, chain_range, chain_limit, boot, lm);
         Some(Box::into_raw(Box::new(p)) as jlong)
     }));
     match r {

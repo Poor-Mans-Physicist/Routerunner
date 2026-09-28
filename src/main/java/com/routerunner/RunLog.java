@@ -410,6 +410,8 @@ public final class RunLog {
                   .append(",\"groups\":").append(lr.prunedGroups)
                   .append(",\"chests\":").append(lr.prunedChests).append('}');
             if (lr.plan.exitHop) sb.append(",\"exitHop\":true");
+            int[] solo = lr.planner.soloSummary();
+            if (solo[0] > 0) sb.append(",\"enigma\":{\"n\":").append(solo[0]).append(",\"value\":").append(solo[1]).append('}');
             if (lr.plan.exitStraight) sb.append(",\"exitStraight\":true");
             sb.append(",\"runList\":[");
             for (int i = 0; i < lr.runs.size(); i++) {

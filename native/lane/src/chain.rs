@@ -110,6 +110,9 @@ pub struct ChainModel {
     pub comp_size: Vec<u32>,
     /// Largest component, 0 for chain ranges.
     pub comp_max: u32,
+    /// Per chest: 0 for an ordinary target, or the value in chests of a solo target (an enigma chest),
+    /// which the miner never chains to or from. Empty when the room has none.
+    solo: Vec<i32>,
 }
 
 /// Stamped scratch for `clear_from`'s membership set.
@@ -128,6 +131,11 @@ impl ChainScratch {
 
 impl ChainModel {
     pub fn new(range: i32, limit: i32, pts: &[P]) -> ChainModel {
+        ChainModel::new_solo(range, limit, pts, Vec::new())
+    }
+
+    /// A chain model where `solo[i] > 0` marks chest i as a solo target worth that many chests.
+    pub fn new_solo(range: i32, limit: i32, pts: &[P], solo: Vec<i32>) -> ChainModel {
         let range = range.max(0);
         let limit = limit.max(1) as usize;
         let bucket = (range + 1).max(1);
@@ -140,6 +148,7 @@ impl ChainModel {
             comp: Vec::new(),
             comp_size: Vec::new(),
             comp_max: 0,
+            solo,
         };
         if range <= 1 && limit > 1 {
             m.label_components();
@@ -185,11 +194,30 @@ impl ChainModel {
     /// component (capped at `limit`, what one trigger can take), counted once per component.
     #[inline]
     pub fn pre_key(&self, i: usize) -> (usize, i32) {
+        if self.is_solo(i) {
+            return (i, self.solo[i]);
+        }
         if self.comp.is_empty() {
             (i, 1)
         } else {
             let c = self.comp[i] as usize;
             (c, self.comp_size[c].min(self.limit as u32) as i32)
+        }
+    }
+
+    /// True when chest i is a solo target.
+    #[inline]
+    pub fn is_solo(&self, i: usize) -> bool {
+        !self.solo.is_empty() && self.solo[i] > 0
+    }
+
+    /// What breaking chest i is worth, in chests: 1, or a solo target's value.
+    #[inline]
+    pub fn value(&self, i: usize) -> i32 {
+        if self.is_solo(i) {
+            self.solo[i]
+        } else {
+            1
         }
     }
 
@@ -207,7 +235,7 @@ impl ChainModel {
     /// produces (dx, dy, dz nested, ascending index within a bucket).
     pub fn neighbors(&self, idx: u32, remaining: &[bool], out: &mut Vec<u32>) {
         out.clear();
-        if self.limit <= 1 {
+        if self.limit <= 1 || self.is_solo(idx as usize) {
             return;
         }
         let c = self.pts[idx as usize];
@@ -220,6 +248,7 @@ impl ChainModel {
                     for &j in self.buckets.at(bx + dx, by + dy, bz + dz) {
                         if j != idx
                             && remaining[j as usize]
+                            && !self.is_solo(j as usize)
                             && Self::cheb(c, self.pts[j as usize]) <= self.range
                         {
                             out.push(j);

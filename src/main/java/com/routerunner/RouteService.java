@@ -554,8 +554,25 @@ public final class RouteService {
                 sr.noRouteWhy = "every group too small to pay";
                 return null;
             }
+            java.util.List<P> planChests = pr.kept;
+            SolidGrid planGrid = pr.grid;
+            int[] solo = null;
+            java.util.List<P> enigmas = cfg.enigmaRouting ? enigmasOf(sr) : java.util.List.of();
+            if (!enigmas.isEmpty()) {
+                if (cfg.enigmaValue >= pr.threshold) {
+                    planChests = new java.util.ArrayList<>(pr.kept);
+                    planChests.addAll(enigmas);
+                    solo = new int[planChests.size()];
+                    for (int i = pr.kept.size(); i < solo.length; i++) solo[i] = cfg.enigmaValue;
+                    planGrid = pr.grid.withTargets(enigmas);
+                    LOG.info("[Routerunner] routing {} enigma chest(s) in {} at {} chests each ({}).", enigmas.size(), sr.roomId, cfg.enigmaValue, reason);
+                } else {
+                    LOG.info("[Routerunner] {} enigma chest(s) in {} left out: worth {} chests, under this room's prune threshold {} ({}).",
+                            enigmas.size(), sr.roomId, cfg.enigmaValue, String.format(Locale.ROOT, "%.1f", pr.threshold), reason);
+                }
+            }
             com.routerunner.lane.LanePlanner planner = new com.routerunner.lane.LanePlanner(
-                    pr.grid, pr.kept, sr.params.chainRange, sr.params.chainLimit, lp, model);
+                    planGrid, planChests, solo, sr.params.chainRange, sr.params.chainLimit, lp, model);
             P start = com.routerunner.lane.Grid.snapInside(pr.grid, startLocal == null ? sr.exitLocal : startLocal);
             P exit = com.routerunner.lane.Grid.snapInside(pr.grid, sr.exitLocal);
             com.routerunner.lane.LanePlanner.Plan plan = planner.plan(start, exit);
@@ -611,6 +628,18 @@ public final class RouteService {
             LOG.warn("[Routerunner] the exit of {} is not walkable from the last lane ({}); exit safety net: walk to a take-off and warp out.",
                     roomId, reason);
         }
+    }
+
+    /** The room's standing enigma chests at snapshot time (room-local, inside its grid). */
+    private static java.util.List<P> enigmasOf(SolvedRoute sr) {
+        java.util.List<P> out = new java.util.ArrayList<>();
+        if (sr.otherChestsLocal == null || sr.otherChestIds == null || sr.grid == null) return out;
+        for (int i = 0; i < Math.min(sr.otherChestsLocal.size(), sr.otherChestIds.size()); i++) {
+            if (!ChestScanner.ENIGMA_ID.equals(sr.otherChestIds.get(i))) continue;
+            P c = sr.otherChestsLocal.get(i);
+            if (c.x() >= 0 && c.y() >= 0 && c.z() >= 0 && c.x() < sr.grid.sx && c.y() < sr.grid.sy && c.z() < sr.grid.sz) out.add(c);
+        }
+        return out;
     }
 
     /** What {@link #prune} kept and dropped, and the numbers behind its threshold. */
@@ -779,7 +808,7 @@ public final class RouteService {
         ResourceLocation id = ForgeRegistries.BLOCKS.getKey(level.getBlockState(pos).getBlock());
         if (id == null) return false;
         String s = id.toString();
-        return s.contains(targetType) && !s.contains("strongbox");
+        return (s.contains(targetType) && !s.contains("strongbox")) || s.equals(ChestScanner.ENIGMA_ID);
     }
 
     private static BlockPos world(SolvedRoute sr, P local) {
@@ -1449,7 +1478,7 @@ public final class RouteService {
     private static void notePlanned(SolvedRoute sr) {
         if (sr.lane == null || sr.lane.plan == null) return;
         String tm = sr.lane.planner.P.timeModel;
-        if (!sr.exitOnly && tm != null && tm.startsWith("shape")) {
+        if (!sr.exitOnly && tm != null && tm.startsWith("shape") && !sr.lane.planner.hasSolo()) {
             RateCal.notePlan(sr.lane.plan.yieldTotal, sr.lane.plan.tTotal, "vein".equals(sr.params.miner));
             if (sr.entryYield <= 0) {
                 sr.entryYield = sr.lane.plan.yieldTotal;

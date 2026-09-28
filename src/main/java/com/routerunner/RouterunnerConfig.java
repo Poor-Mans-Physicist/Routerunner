@@ -28,6 +28,9 @@ public class RouterunnerConfig {
     /** The config layout this build writes; older files are migrated once on load ({@link #migrate}). */
     static final int CONFIG_VERSION = 2;
 
+    /** Range of {@link #enigmaValue}. */
+    public static final int ENIGMA_MIN = 1, ENIGMA_MAX = 100;
+
     /** Layout version of this file: 0 for files written before 1.2.0. */
     public int configVersion = 0;
 
@@ -91,6 +94,12 @@ public class RouterunnerConfig {
     public boolean forceRunLog = false;
     /** Draw purple borders around the rooms on the densest chunk-alignment lines on Vault Mapper's map. */
     public boolean mapperAxisLines = false;
+    /** Outline enigma chests (rare, mapped vaults only) in red and purple, through walls. */
+    public boolean enigmaHighlight = true;
+    /** Route enigma chests: each is its own click (no miner chains to or from one) worth {@link #enigmaValue} chests. */
+    public boolean enigmaRouting = false;
+    /** What one enigma chest is worth to the planner, in ordinary chests (1-100). */
+    public int enigmaValue = 10;
 
     public static RouterunnerConfig get() {
         if (INSTANCE == null) {
@@ -261,6 +270,12 @@ public class RouterunnerConfig {
             double fixed = v < 0.0 ? 0.0 : 1.0;
             LOGGER.error("[Routerunner] opacity {} = {} is outside [0,1]; clamped to {}.", e.getKey(), v, fixed);
             e.setValue(fixed);
+            changed = true;
+        }
+        if (enigmaValue < ENIGMA_MIN || enigmaValue > ENIGMA_MAX) {
+            int was = enigmaValue;
+            enigmaValue = Math.max(ENIGMA_MIN, Math.min(ENIGMA_MAX, enigmaValue));
+            LOGGER.error("[Routerunner] enigmaValue {} is outside [{},{}]; clamped to {}.", was, ENIGMA_MIN, ENIGMA_MAX, enigmaValue);
             changed = true;
         }
         if (runLogCapMB < 50) {

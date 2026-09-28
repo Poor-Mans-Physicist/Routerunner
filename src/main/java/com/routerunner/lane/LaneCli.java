@@ -46,6 +46,8 @@ public final class LaneCli {
         int chainLimit = 32;
         String[] modes = {"corridor", "point"};
         Map<String, Double> params;
+        /** Optional, one per chest: 0, or the value of a solo target (an enigma chest; its cell becomes breakable). */
+        int[] solo;
     }
 
     static final class GridIn {
@@ -109,6 +111,13 @@ public final class LaneCli {
         SolidGrid grid = decodeGrid(r.grid);
         List<P> chests = new ArrayList<>(r.chests.length);
         for (int[] c : r.chests) chests.add(new P(c[0], c[1], c[2]));
+        int[] solo = r.solo != null && r.solo.length == chests.size() ? r.solo : null;
+        if (r.solo != null && solo == null) throw new IOException("room " + r.key + ": solo has " + r.solo.length + " entries for " + chests.size() + " chests");
+        if (solo != null) {
+            List<P> cells = new ArrayList<>();
+            for (int i = 0; i < solo.length; i++) if (solo[i] > 0) cells.add(chests.get(i));
+            grid = grid.withTargets(cells);
+        }
         P entrance = Grid.snapInside(grid, new P(r.entrance[0], r.entrance[1], r.entrance[2]));
         P exit = Grid.snapInside(grid, new P(r.exit[0], r.exit[1], r.exit[2]));
         Map<String, Object> out = new LinkedHashMap<>();
@@ -136,7 +145,7 @@ public final class LaneCli {
                 if (r.params.containsKey("bailFloor")) p.bailFloor = r.params.get("bailFloor");
                 if (r.params.containsKey("triggerS")) p.triggerS = r.params.get("triggerS");
             }
-            LanePlanner planner = new LanePlanner(grid, chests, r.chainRange, r.chainLimit, p, model);
+            LanePlanner planner = new LanePlanner(grid, chests, solo, r.chainRange, r.chainLimit, p, model);
             LanePlanner.Plan plan = planner.plan(entrance, exit);
             out.put(mode, planner.export(plan, r.origin[0], r.origin[1], r.origin[2], r.tEntry));
             log.add(String.format(java.util.Locale.ROOT, "  %-8s %-9s chests %4d lanes %3d runs %3d cover %.2f model %5.1f s  (%.2f s)",

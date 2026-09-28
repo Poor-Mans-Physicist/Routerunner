@@ -192,10 +192,19 @@ public final class LanePlanner {
     }
 
     public LanePlanner(SolidGrid grid, List<P> chests, int chainRange, int chainLimit, Params params, LegTimeModel model) {
+        this(grid, chests, null, chainRange, chainLimit, params, model);
+    }
+
+    /**
+     * A planner where {@code soloValue[i] > 0} marks chest i as a solo target (an enigma chest): never chained to or
+     * from, worth {@code soloValue[i]} chests in every yield and rate. Null: ordinary targets only.
+     */
+    public LanePlanner(SolidGrid grid, List<P> chests, int[] soloValue, int chainRange, int chainLimit, Params params, LegTimeModel model) {
+        this.soloValue = soloValue;
         this.P = params;
         this.grid = grid;
         this.chests = chests;
-        this.chain = new ChainModel(chainRange, chainLimit, chests);
+        this.chain = new ChainModel(chainRange, chainLimit, chests, soloValue);
         this.model = model;
         for (int i = 0; i < chests.size(); i++) {
             P c = chests.get(i);
@@ -205,7 +214,9 @@ public final class LanePlanner {
         long h = 0;
         if (params.useNative && NativeLane.ready()) {
             try {
-                h = NativeLane.create(grid.sx, grid.sy, grid.sz, solidBits(grid), chestArray(chests), chainRange, chainLimit, modelArray(model));
+                h = soloValue == null
+                        ? NativeLane.create(grid.sx, grid.sy, grid.sz, solidBits(grid), chestArray(chests), chainRange, chainLimit, modelArray(model))
+                        : NativeLane.createSolo(grid.sx, grid.sy, grid.sz, solidBits(grid), chestArray(chests), chainRange, chainLimit, modelArray(model), soloValue);
                 if (h == 0) LOGGER.log(System.Logger.Level.ERROR, "[Routerunner] native lane planner refused the room; planning in Java instead.");
             } catch (Throwable t) {
                 LOGGER.log(System.Logger.Level.ERROR, "[Routerunner] native lane planner failed to start; planning in Java instead.", t);
@@ -218,6 +229,21 @@ public final class LanePlanner {
 
     private static final System.Logger LOGGER = System.getLogger("Routerunner");
     private static final Cleaner CLEANER = Cleaner.create();
+    private final int[] soloValue;
+
+    /** True when some chest is a solo target (an enigma chest). */
+    public boolean hasSolo() {
+        if (soloValue == null) return false;
+        for (int v : soloValue) if (v > 0) return true;
+        return false;
+    }
+
+    /** Solo targets (enigma chests) in this planner's chest list, and the value of the first one (0 when none). */
+    public int[] soloSummary() {
+        int n = 0, v = 0;
+        if (soloValue != null) for (int s : soloValue) if (s > 0) { n++; if (v == 0) v = s; }
+        return new int[]{n, v};
+    }
     private final long nativeHandle;
     private final Cleaner.Cleanable cleanable;
 
@@ -467,7 +493,7 @@ public final class LanePlanner {
 
     private int liveReach(P cell, boolean[] remaining) {
         int n = 0;
-        for (int i : reach(cell)) if (remaining[i]) n++;
+        for (int i : reach(cell)) if (remaining[i]) n += chain.value(i);
         return n;
     }
 
@@ -500,8 +526,7 @@ public final class LanePlanner {
                 if (best < 0) break;
                 List<Integer> cl = chain.clearFrom(best, remaining);
                 int[] arr = new int[cl.size()];
-                for (int j = 0; j < arr.length; j++) { arr[j] = cl.get(j); remaining[arr[j]] = false; }
-                total += arr.length;
+                for (int j = 0; j < arr.length; j++) { arr[j] = cl.get(j); remaining[arr[j]] = false; total += chain.value(arr[j]); }
                 triggers.add(new Trigger(cell, best, arr));
             }
         }
@@ -1160,7 +1185,7 @@ public final class LanePlanner {
             exitTimeCache.clear();
         }
         int live = 0;
-        for (boolean b : remainingIn) if (b) live++;
+        for (int i = 0; i < remainingIn.length; i++) if (remainingIn[i]) live += chain.value(i);
         boolean[] remaining = remainingIn.clone();
         State st = new State(entrance, null, 0);
         List<Double> first = new ArrayList<>();

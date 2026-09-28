@@ -180,9 +180,57 @@ public final class LaneRenderer {
         return LaneRoute.hotEndIndex(poly, prog);
     }
 
+    private static final float[] ENIGMA_OUTER = {1.0f, 0.12f, 0.12f};
+    private static final float[] ENIGMA_INNER = {0.72f, 0.25f, 1.0f};
+    /** Blocks around the player within which enigma chests are outlined. */
+    private static final int ENIGMA_RADIUS = 64;
+
+    /**
+     * Enigma chests (rare, map-only): a red wireframe with a purple one inside, drawn through walls, whether or not
+     * a route is shown, while {@code enigmaHighlight} is on.
+     */
+    @SubscribeEvent
+    public static void onRenderEnigmas(RenderLevelLastEvent event) {
+        Minecraft mc = Minecraft.getInstance();
+        RouterunnerConfig cfg = RouterunnerConfig.get();
+        if (!cfg.enabled || !cfg.enigmaHighlight) return;
+        if (mc.player == null || mc.level == null || mc.options.hideGui) return;
+        List<BlockPos> en = com.routerunner.ChestScanner.enigmasNear(mc.player.blockPosition(), ENIGMA_RADIUS);
+        if (en.isEmpty()) return;
+        float a = (float) Math.max(0.0, Math.min(1.0, cfg.masterOpacity));
+        if (a <= 0f) return;
+        Vec3 cam = mc.gameRenderer.getMainCamera().getPosition();
+        PoseStack ps = event.getPoseStack();
+        ps.pushPose();
+        ps.translate(-cam.x, -cam.y, -cam.z);
+        Matrix4f mat = ps.last().pose();
+        RenderSystem.disableCull();
+        RenderSystem.enableBlend();
+        RenderSystem.defaultBlendFunc();
+        RenderSystem.setShader(GameRenderer::getPositionColorShader);
+        RenderSystem.depthMask(false);
+        RenderSystem.disableDepthTest();
+        Tesselator tess = Tesselator.getInstance();
+        BufferBuilder buf = tess.getBuilder();
+        buf.begin(VertexFormat.Mode.QUADS, DefaultVertexFormat.POSITION_COLOR);
+        for (BlockPos b : en) {
+            wire(buf, mat, b, ENIGMA_OUTER, 0.95f * a, 0.05f, 0.08);
+            wire(buf, mat, b, ENIGMA_INNER, 0.9f * a, 0.04f, -0.12);
+        }
+        tess.end();
+        RenderSystem.depthMask(true);
+        RenderSystem.enableDepthTest();
+        RenderSystem.enableCull();
+        ps.popPose();
+    }
+
     /** A bright wireframe around a block: twelve thin bars, each drawn in two planes so it reads from any angle. */
     private static void wire(BufferBuilder buf, Matrix4f mat, BlockPos b, float[] c, float a, float half) {
-        double o = TARGET_OUTSET;
+        wire(buf, mat, b, c, a, half, TARGET_OUTSET);
+    }
+
+    /** {@link #wire} with the frame {@code o} blocks outside the block (negative: inside it). */
+    private static void wire(BufferBuilder buf, Matrix4f mat, BlockPos b, float[] c, float a, float half, double o) {
         double x0 = b.getX() - o, y0 = b.getY() - o, z0 = b.getZ() - o;
         double x1 = b.getX() + 1 + o, y1 = b.getY() + 1 + o, z1 = b.getZ() + 1 + o;
         double[] nx = {1, 0, 0}, ny = {0, 1, 0}, nz = {0, 0, 1};

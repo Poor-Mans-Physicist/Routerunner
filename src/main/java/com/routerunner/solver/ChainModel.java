@@ -35,8 +35,19 @@ public final class ChainModel {
     private final int[] compSize;
     /** Largest component, 0 for chain ranges. */
     public final int compMax;
+    /**
+     * Per chest: 0 for an ordinary target, or the value in chests of a solo target (an enigma chest): one the miner never
+     * chains to or from, broken by its own click. Null when the room has none.
+     */
+    private final int[] soloValue;
 
     public ChainModel(int range, int limit, List<P> pts) {
+        this(range, limit, pts, null);
+    }
+
+    /** A chain model where {@code soloValue[i] > 0} marks chest i as a solo target worth that many chests. */
+    public ChainModel(int range, int limit, List<P> pts, int[] soloValue) {
+        this.soloValue = soloValue;
         this.range = Math.max(0, range);
         this.limit = Math.max(1, limit);
         this.bucket = Math.max(1, this.range + 1);
@@ -111,6 +122,7 @@ public final class ChainModel {
 
     /** Pre-filter value of chest i: 1, or at range 1 its component's size capped at {@link #limit}. */
     public int preValue(int i) {
+        if (isSolo(i)) return soloValue[i];
         return comp == null ? 1 : Math.min(compSize[comp[i]], limit);
     }
 
@@ -154,9 +166,22 @@ public final class ChainModel {
         return Math.abs(a.x() - b.x()) + Math.abs(a.y() - b.y()) + Math.abs(a.z() - b.z());
     }
 
-    /** Indices j != idx with remaining[j] and within {@link #range} (Chebyshev) of pts[idx]. */
+    /** True when chest i is a solo target (see {@link #soloValue}). */
+    public boolean isSolo(int i) {
+        return soloValue != null && soloValue[i] > 0;
+    }
+
+    /** What breaking chest i is worth, in chests: 1, or a solo target's value. */
+    public int value(int i) {
+        return isSolo(i) ? soloValue[i] : 1;
+    }
+
+    /**
+     * Indices j != idx with remaining[j] and within {@link #range} (Chebyshev) of pts[idx]; none for a solo target,
+     * and never a solo target.
+     */
     public List<Integer> neighbors(int idx, boolean[] remaining) {
-        if (limit <= 1) return new ArrayList<>();
+        if (limit <= 1 || isSolo(idx)) return new ArrayList<>();
         List<Integer> out = new ArrayList<>();
         P c = pts.get(idx);
         int bx = bucketCoord(c.x()), by = bucketCoord(c.y()), bz = bucketCoord(c.z());
@@ -166,7 +191,7 @@ public final class ChainModel {
                     List<Integer> v = buckets.get(packBucket(bx + dx, by + dy, bz + dz));
                     if (v == null) continue;
                     for (int j : v) {
-                        if (j != idx && remaining[j] && cheb(c, pts.get(j)) <= range) out.add(j);
+                        if (j != idx && remaining[j] && !isSolo(j) && cheb(c, pts.get(j)) <= range) out.add(j);
                     }
                 }
             }

@@ -58,6 +58,21 @@ public final class SolidGrid {
         return g;
     }
 
+    /** A copy where {@code cells} are targets (breakable, not walls), e.g. enigma chests joining the route. */
+    public SolidGrid withTargets(java.util.Collection<P> cells) {
+        SolidGrid g = new SolidGrid(sx, sy, sz);
+        System.arraycopy(solid, 0, g.solid, 0, solid.length);
+        System.arraycopy(target, 0, g.target, 0, target.length);
+        for (P c : cells) {
+            if (!inBounds(c.x(), c.y(), c.z())) continue;
+            int i = idx(c.x(), c.y(), c.z());
+            g.solid[i] = true;
+            g.target[i] = true;
+        }
+        if (clearanceFly != null) g.bakeClearance();
+        return g;
+    }
+
     public boolean isSolid(int x, int y, int z) {
         if (!inBounds(x, y, z)) return true;
         return solid[idx(x, y, z)];

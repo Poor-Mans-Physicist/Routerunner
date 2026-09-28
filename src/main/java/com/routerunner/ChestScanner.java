@@ -46,6 +46,21 @@ public class ChestScanner {
     private static int tickCheckBreaks = 0;
     private static int scanBreaks = 0;
 
+    /** Registry id of the enigma chest (map-only, rare). */
+    public static final String ENIGMA_ID = "the_vault:enigma_chest";
+
+    /** Standing enigma chests seen this vault within {@code radius} blocks (Chebyshev) of {@code around}. */
+    public static java.util.List<BlockPos> enigmasNear(BlockPos around, int radius) {
+        java.util.List<BlockPos> out = new java.util.ArrayList<>();
+        for (Map.Entry<BlockPos, String> e : tracked.entrySet()) {
+            if (!ENIGMA_ID.equals(e.getValue())) continue;
+            BlockPos p = e.getKey();
+            if (Math.abs(p.getX() - around.getX()) <= radius && Math.abs(p.getY() - around.getY()) <= radius
+                    && Math.abs(p.getZ() - around.getZ()) <= radius) out.add(p);
+        }
+        return out;
+    }
+
     public static boolean isChest(Block block) {
         ResourceLocation id = ForgeRegistries.BLOCKS.getKey(block);
         return id != null && CHEST_IDS.contains(id.toString());

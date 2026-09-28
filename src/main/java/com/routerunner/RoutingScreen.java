@@ -45,6 +45,15 @@ public class RoutingScreen extends Screen {
             cfg.offscreenIndicator = !cfg.offscreenIndicator;
             b.setMessage(arrowLabel());
         }));
+        y += step;
+        this.addRenderableWidget(new Button(lx, y, bw, 20, enigmaLabel(), b -> {
+            RouterunnerConfig cfg = RouterunnerConfig.get();
+            cfg.enigmaRouting = !cfg.enigmaRouting;
+            b.setMessage(enigmaLabel());
+        }, (b, pose, mx, my) -> this.renderTooltip(pose, this.font.split(new TextComponent(
+                "Routed: the planner collects enigma chests along with the room's chests, each as its own click (neither miner "
+                        + "chains to or from one), valued by the slider. Applies from the next room plan."), 250), mx, my)));
+        this.addRenderableWidget(new EnigmaSlider(rx, y, bw));
 
         y = top;
         adaptiveButton = this.addRenderableWidget(new Button(rx, y, bw, 20, adaptiveLabel(), b -> {
@@ -86,6 +95,43 @@ public class RoutingScreen extends Screen {
 
     private Component roomPickerLabel() {
         return new TextComponent("Next room: " + (RouterunnerConfig.get().adaptiveRooms ? "Adaptive" : "Straight"));
+    }
+
+    private Component enigmaLabel() {
+        return new TextComponent("Enigma chests: " + (RouterunnerConfig.get().enigmaRouting ? "Routed" : "Ignored"));
+    }
+
+    /** Enigma chest value in ordinary chests, 1 to 100. */
+    private final class EnigmaSlider extends net.minecraft.client.gui.components.AbstractSliderButton {
+        EnigmaSlider(int x, int y, int w) {
+            super(x, y, w, 20, TextComponent.EMPTY, toSlider(RouterunnerConfig.get().enigmaValue));
+            updateMessage();
+        }
+
+        private static double toSlider(int v) {
+            return (v - RouterunnerConfig.ENIGMA_MIN) / (double) (RouterunnerConfig.ENIGMA_MAX - RouterunnerConfig.ENIGMA_MIN);
+        }
+
+        private int current() {
+            return (int) Math.round(RouterunnerConfig.ENIGMA_MIN + this.value * (RouterunnerConfig.ENIGMA_MAX - RouterunnerConfig.ENIGMA_MIN));
+        }
+
+        @Override
+        protected void updateMessage() {
+            this.setMessage(new TextComponent("Enigma value: " + current() + " chests"));
+        }
+
+        @Override
+        protected void applyValue() {
+            RouterunnerConfig.get().enigmaValue = current();
+        }
+
+        @Override
+        public void renderToolTip(PoseStack ps, int mx, int my) {
+            RoutingScreen.this.renderTooltip(ps, RoutingScreen.this.font.split(new TextComponent(
+                    "How many ordinary chests one enigma chest is worth to the planner (1 to 100). Higher pulls the route "
+                            + "further out of its way for one."), 250), mx, my);
+        }
     }
 
     private Component arrowLabel() {

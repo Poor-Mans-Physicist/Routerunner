@@ -61,6 +61,10 @@ public class VisualsScreen extends Screen {
         list.add(new ToggleEntry(() -> "Hunter boxes: " + (cfg.suppressHunter ? "Hidden" : "Shown"),
                 "Show or hide the_vault's Hunter ability chest outlines.",
                 () -> cfg.suppressHunter = !cfg.suppressHunter));
+        list.add(new ToggleEntry(() -> "Enigma chest outlines: " + (cfg.enigmaHighlight ? "Shown" : "Hidden"),
+                "A red and purple wireframe around every enigma chest within 64 blocks, through walls. Enigma chests are rare and only "
+                        + "spawn in mapped vaults. To have the route collect them, see Routing.",
+                () -> cfg.enigmaHighlight = !cfg.enigmaHighlight));
         this.addWidget(list);
 
         int cx = this.width / 2;

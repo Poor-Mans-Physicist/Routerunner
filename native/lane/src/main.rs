@@ -56,6 +56,9 @@ struct RoomIn {
     modes: Vec<String>,
     #[serde(default)]
     params: Option<HashMap<String, f64>>,
+    /// Optional, one per chest: 0, or the value of a solo target (an enigma chest; its cell becomes breakable).
+    #[serde(default)]
+    solo: Option<Vec<i32>>,
 }
 
 #[derive(Deserialize)]
@@ -167,6 +170,21 @@ fn decode_grid(g: &GridIn) -> Result<SolidGrid, String> {
     Ok(grid)
 }
 
+/// Make the solo targets' cells breakable (the logged grid holds every non-target chest as solid), as the game's
+/// `SolidGrid.withTargets` does, and re-bake the clearance.
+fn open_solo_cells(g: &mut SolidGrid, chests: &[P], solo: &[i32]) {
+    if solo.is_empty() {
+        return;
+    }
+    for (c, &v) in chests.iter().zip(solo.iter()) {
+        if v > 0 && c.x >= 0 && c.y >= 0 && c.z >= 0 && c.x < g.sx && c.y < g.sy && c.z < g.sz {
+            let i = g.idx(c.x, c.y, c.z);
+            g.solid[i] = false;
+        }
+    }
+    g.bake_clearance();
+}
+
 fn plan_room(r: &RoomIn, model_in: &LegTimeModel, shape: Option<&RawShape>) -> Result<J, String> {
     let mut model = model_in.clone();
     let mut shape_click = None;
@@ -177,8 +195,13 @@ fn plan_room(r: &RoomIn, model_in: &LegTimeModel, shape: Option<&RawShape>) -> R
         shape_click = Some(cs);
     }
     let model = &model;
-    let grid = decode_grid(&r.grid)?;
+    let mut grid = decode_grid(&r.grid)?;
+    let solo: Vec<i32> = r.solo.clone().unwrap_or_default();
+    if !solo.is_empty() && solo.len() != r.chests.len() {
+        return Err(format!("room {}: solo has {} entries for {} chests", r.key, solo.len(), r.chests.len()));
+    }
     let chests: Vec<P> = r.chests.iter().map(|c| P::new(c[0], c[1], c[2])).collect();
+    open_solo_cells(&mut grid, &chests, &solo);
     let entrance = snap_inside(&grid, P::new(r.entrance[0], r.entrance[1], r.entrance[2]));
     let exit = snap_inside(&grid, P::new(r.exit[0], r.exit[1], r.exit[2]));
     let mut out: Vec<(&str, J)> = vec![("key", J::S(r.key.clone()))];
@@ -227,10 +250,12 @@ fn plan_room(r: &RoomIn, model_in: &LegTimeModel, shape: Option<&RawShape>) -> R
         }
         // The grid is cheap to rebuild and the planner owns it, matching the Java CLI's
         // one-planner-per-mode construction.
-        let g2 = decode_grid(&r.grid)?;
-        let mut planner = Planner::new(
+        let mut g2 = decode_grid(&r.grid)?;
+        open_solo_cells(&mut g2, &chests, &solo);
+        let mut planner = Planner::new_solo(
             g2,
             chests.clone(),
+            solo.clone(),
             r.chain_range,
             r.chain_limit,
             p,

@@ -85,6 +85,9 @@ public final class NativeLane {
 
     static native long create(int sx, int sy, int sz, byte[] solidBits, int[] chests, int chainRange, int chainLimit, double[] model);
 
+    /** {@link #create} with solo targets: {@code soloValue[i] > 0} marks chest i as never chained, worth that many chests. */
+    static native long createSolo(int sx, int sy, int sz, byte[] solidBits, int[] chests, int chainRange, int chainLimit, double[] model, int[] soloValue);
+
     static native String plan(long handle, int ex, int ey, int ez, int xx, int xy, int xz, byte[] mask, double[] params);
 
     static native String path(long handle, int ax, int ay, int az, int bx, int by, int bz);
