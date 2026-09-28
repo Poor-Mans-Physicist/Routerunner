@@ -78,6 +78,11 @@ Press **`[`** to open the menu. You can rebind it under Options → Controls →
 The bail and exit weights (`laneBail`, `laneExitWeight`, `laneBailRateFrac`) can be edited in
 `config/routerunner/config.json`; the defaults are what the timing model was tuned with.
 
+## Benchmarks
+
+[`benchmarks/`](benchmarks/) holds the chain vs vein benchmark panel (best chests per minute for every Bonus × Cascade
+crystal, with per-tile error margins) and a validation report comparing real runs on the recent builds against it.
+
 ## Building
 
 The lane planner lives in `native/lane` (Rust). Build it first, then the jar; the jar packs the library it finds:
