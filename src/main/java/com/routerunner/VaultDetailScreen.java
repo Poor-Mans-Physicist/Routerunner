@@ -85,7 +85,7 @@ public class VaultDetailScreen extends Screen {
                 boolean hov = mouseX >= x0 && mouseX <= x0 + W && mouseY >= y && mouseY < y + ROW_H && mouseY >= top && mouseY < bottom;
                 if (hov) fill(ps, x0 - 2, y - 2, x0 + W, y + ROW_H - 3, 0x30FFFFFF);
                 String[] v = {(open.contains(i) ? "- " : "+ ") + l.lap, RouterunnerHud.clock((long) (l.activeMin * 60_000)), String.format(Locale.ROOT, "%,d", l.chests),
-                        num(l.activeAvg), num(l.actualCpm), num(l.paceCpm), num(l.benchCpm), num(l.density)};
+                        num(l.activeAvg), num(l.actualCpm), num(l.paceCpm) + (l.paceLive ? "*" : ""), num(l.benchCpm), num(l.density)};
                 for (int c = 0; c < v.length; c++) f.drawShadow(ps, v[c], x0 + COL_X[c], y, c >= 4 && c <= 6 ? colColor(c) : 0xFFFFFF);
             }
             y += ROW_H;
@@ -105,7 +105,8 @@ public class VaultDetailScreen extends Screen {
                             + "Benchmark: the pack author's speed on the same room plans. Your Pace: the same plans at your measured "
                             + "speed, coverage and switch time as they were when the vault started. Actual below Your Pace is time "
                             + "spent off the route's moves; above it, you beat your own pace. Active is the HUD's lap average "
-                            + "(all time, hallways and idle included)."), 260), mouseX, mouseY);
+                            + "(all time, hallways and idle included). * Your speed was still being measured when the vault "
+                            + "started (under 40 rooms), so those rooms used your speed as measured so far."), 260), mouseX, mouseY);
         }
     }
 

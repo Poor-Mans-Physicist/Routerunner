@@ -18,7 +18,11 @@ import java.util.TreeMap;
  *   <li><b>benchmark</b>: what the benchmark player collects on the same plans (the shape model with its coverage and
  *   switch);</li>
  *   <li><b>your pace</b>: the same plans at the player's calibrated pace, coverage and switch as they stood at vault
- *   entry, so it is a prediction, not a fit to the lap.</li>
+ *   entry, so it is a prediction, not a fit to the lap. While that calibration was still unsettled (under
+ *   {@link PlayerCalibration#SETTLED_ROOMS} rooms for the miner, e.g. a first vault) each room uses the calibration as
+ *   it stands when the room is measured instead, and the lap is marked {@link Lap#paceLive}. The pace measures moves
+ *   and clicks only, never the route's chests per minute, so this stays a prediction of the route at the player's
+ *   speed rather than a fit to the lap's rate.</li>
  * </ul>
  * Actual below your pace is route adherence: moves and clicks the route did not ask for.
  */
@@ -36,6 +40,8 @@ public final class LapRecorder {
         /** The player's speed (1 / pace) the prediction used, per miner, and the miner of most rooms. */
         public double speedChain = 1.0, speedVein = 1.0;
         public String miner = "chain";
+        /** Your Pace used the live calibration (it was unsettled at vault entry) for at least one room. */
+        public boolean paceLive;
         public List<float[]> samples = new ArrayList<>();
     }
 
@@ -44,6 +50,7 @@ public final class LapRecorder {
         public double chests, realS, idleS, clumpSum;
         public int rooms, veinRooms, planned;
         public double pChests, pRealS, pBenchY, pBenchT, pPaceY, pPaceT;
+        public boolean live;
         public long lastSampleMs = -1;
         public List<float[]> samples = new ArrayList<>();
     }
@@ -52,6 +59,7 @@ public final class LapRecorder {
     public static final class State {
         public List<Lap> laps = new ArrayList<>();
         public Map<Integer, Acc> accs = new TreeMap<>();
+        /** Calibration at vault entry: pace chain, vein; coverage chain, vein; switch chain, vein; rooms chain, vein. */
         public double[] snap;
     }
 
@@ -62,8 +70,13 @@ public final class LapRecorder {
     /** Vault entry (not a reconnect): no laps yet, and the calibration frozen for this vault's predictions. */
     public static synchronized void start() {
         state = new State();
+        state.snap = snapNow();
+    }
+
+    private static double[] snapNow() {
         PlayerCalibration.Snapshot s = PlayerCalibration.snapshot();
-        state.snap = new double[]{s.paceChain(), s.paceVein(), s.covChain(), s.covVein(), s.swChain(), s.swVein()};
+        return new double[]{s.paceChain(), s.paceVein(), s.covChain(), s.covVein(), s.swChain(), s.swVein(),
+                PlayerCalibration.rooms(false), PlayerCalibration.rooms(true)};
     }
 
     public static synchronized State state() {
@@ -74,10 +87,7 @@ public final class LapRecorder {
     public static synchronized void restore(State s) {
         if (s == null) return;
         state = s;
-        if (state.snap == null) {
-            PlayerCalibration.Snapshot p = PlayerCalibration.snapshot();
-            state.snap = new double[]{p.paceChain(), p.paceVein(), p.covChain(), p.covVein(), p.swChain(), p.swVein()};
-        }
+        if (state.snap == null || state.snap.length < 8) state.snap = snapNow();
     }
 
     private static Acc acc(int lap) {
@@ -92,6 +102,12 @@ public final class LapRecorder {
         LegTimeModel.Shape sh = LegTimeModel.shape();
         double swB = sh.switchS(v), cov = sh.coverage(v);
         double pace = state.snap[v ? 1 : 0], covRel = state.snap[v ? 3 : 2], swP = state.snap[v ? 5 : 4];
+        if (state.snap[v ? 7 : 6] < PlayerCalibration.SETTLED_ROOMS) {
+            pace = PlayerCalibration.pace(v);
+            covRel = PlayerCalibration.coverage(v);
+            swP = PlayerCalibration.switchS(v);
+            a.live = true;
+        }
         double sw = m.switchS() > 0 && m.switchS() <= PlayerCalibration.MAX_SWITCH_S ? m.switchS() : swB;
         a.chests += m.chests();
         a.realS += m.realS();
@@ -157,9 +173,12 @@ public final class LapRecorder {
         lap.density = d < 0 ? Double.NaN : d;
         lap.clump = a.rooms > 0 ? a.clumpSum / a.rooms : Double.NaN;
         if (state.snap != null) {
-            lap.speedChain = 1.0 / state.snap[0];
-            lap.speedVein = 1.0 / state.snap[1];
+            boolean liveC = state.snap.length < 8 || state.snap[6] < PlayerCalibration.SETTLED_ROOMS;
+            boolean liveV = state.snap.length < 8 || state.snap[7] < PlayerCalibration.SETTLED_ROOMS;
+            lap.speedChain = 1.0 / (liveC ? PlayerCalibration.pace(false) : state.snap[0]);
+            lap.speedVein = 1.0 / (liveV ? PlayerCalibration.pace(true) : state.snap[1]);
         }
+        lap.paceLive = a.live;
         lap.miner = a.veinRooms * 2 > a.rooms ? "vein" : "chain";
         lap.samples = a.samples;
         state.laps.add(lap);
