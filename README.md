@@ -10,7 +10,8 @@ that helps you loot more chests per minute in vaults.
 - **Lane route.** A planner solves each room as you enter it, and draws the route on the floor: a chain of short runs
   through the densest chests, a heat map over the chests to mine, green markers on the next target cluster, purple
   arrows for dashes, and a green exit path when the room becomes sparse enough to not be worth looting further.
-  Routes are planned for your mining ability: Chain Miner or Vein Miner.
+  It supports both Chain Miner and Vein Miner; the overlays are slightly different depending on which you use, and
+  Vein Miner is generally preferable in very large vaults with over 90 total chest-improving modifiers.
 - **Next room.** The adaptive room picker leaves each room by the door toward the best unvisited rooms around it,
   using the loaded rooms' chest counts and the vault's chunk-alignment pattern. Challenge rooms that lock you in only
   get the way out drawn, and the labyrinth is never routed into.
