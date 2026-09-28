@@ -46,7 +46,10 @@ public class ChestScanner {
     private static int tickCheckBreaks = 0;
     private static int scanBreaks = 0;
 
-    /** Registry id of the enigma chest (map-only, rare). */
+    /**
+     * Registry id of the enigma chest (map-only, rare). It is tracked for its outline and its break is logged, but it
+     * is never a mined chest: not in chests per minute, the loot type detection or the running rate.
+     */
     public static final String ENIGMA_ID = "the_vault:enigma_chest";
 
     /** Standing enigma chests seen this vault within {@code radius} blocks (Chebyshev) of {@code around}. */
@@ -153,6 +156,11 @@ public class ChestScanner {
         }
         BlockState state = level.getBlockState(pos);
         if (isChest(state.getBlock())) return false;
+        if (ENIGMA_ID.equals(chestId)) {
+            RunLog.breakEvent(pos, chestId);
+            it.remove();
+            return false;
+        }
         LootListener.get().onMinedChest(chestId);
         RunLog.breakEvent(pos, chestId);
         RouteService.onChestBroken(pos);

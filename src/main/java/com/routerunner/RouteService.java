@@ -477,7 +477,7 @@ public final class RouteService {
                     current = sr;
                     notePlanned(sr);
                     RunLog.roomSolve(sr);
-                    int planned = sr.lane == null ? 0 : sr.lane.plan.yieldTotal;
+                    int planned = sr.lane == null ? 0 : sr.lane.planner.regularYield(sr.lane.plan);
                     LOG.info("[Routerunner] Solved {} ({} chests, {}% planned, {} {}/{}, speed {}) in {} ms (geometry {} ms, queued {} ms){}.", roomId,
                             snap.targetsLocal.size(), snap.targetsLocal.isEmpty() ? 0 : (100 * planned / snap.targetsLocal.size()),
                             params.miner, params.chainRange, params.chainLimit, String.format(Locale.ROOT, "%.3f", params.speedAttr),
@@ -1103,7 +1103,7 @@ public final class RouteService {
             java.util.List<P> path = lr == null ? java.util.List.of() : lr.plannedPathLocal();
             double[] user = RoutePlanner.scoreTrajectory(room.userTrail, room.grid, pm);
             double[] solver = lr == null ? null : scoreWalk(path, room.grid, pm);
-            int solverChests = lr == null ? 0 : lr.plan.yieldTotal;
+            int solverChests = lr == null ? 0 : lr.planner.regularYield(lr.plan);
             double sec = Math.max(0.001, (room.userLastMs - room.userFirstMs) / 1000.0);
             double[] follow = path.size() < 2 ? null : followDeviation(room.userTrail, path);
             if (follow != null) room.followAvgOff = follow[0];
@@ -1442,7 +1442,7 @@ public final class RouteService {
             com.routerunner.lane.LaneRoute lr = solveLanes(sr, snap.targetsLocal, snap.entranceLocal, cfg, "picker", 0.0, false);
             if (lr == null || lr.plan == null) continue;
             sumT += lr.plan.tTotal;
-            sumY += lr.plan.yieldTotal;
+            sumY += lr.planner.regularYield(lr.plan);
             k++;
         }
         if (k == 0) {
@@ -1487,7 +1487,7 @@ public final class RouteService {
         }
         if (!RoomPicker.isRoomCell(Math.floorDiv(sr.ox, RoomGeometry.CELL), Math.floorDiv(sr.oz, RoomGeometry.CELL))) return;
         RoomPicker.onPlanned(Math.floorDiv(sr.ox, RoomGeometry.CELL), Math.floorDiv(sr.oz, RoomGeometry.CELL),
-                sr.lane.plan.tTotal, sr.lane.plan.yieldTotal);
+                sr.lane.plan.tTotal, sr.lane.planner.regularYield(sr.lane.plan));
     }
 
     /**

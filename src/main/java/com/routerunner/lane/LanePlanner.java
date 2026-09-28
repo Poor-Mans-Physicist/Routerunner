@@ -238,6 +238,40 @@ public final class LanePlanner {
         return false;
     }
 
+    /**
+     * A plan's yield in ordinary chests: its yield minus the value of the solo targets (enigma chests) it clears. The
+     * solo value only steers the plan; rates and counts reported outside the planner use this.
+     */
+    public int regularYield(Plan plan) {
+        if (plan == null) return 0;
+        if (!hasSolo()) return plan.yieldTotal;
+        int solo = 0;
+        for (Lane l : plan.lanes) {
+            if (l.transTriggers != null) for (Trigger t : l.transTriggers) solo += soloIn(t);
+            if (l.triggers != null) for (Trigger t : l.triggers) solo += soloIn(t);
+        }
+        for (Trigger t : plan.exitTriggers) solo += soloIn(t);
+        return plan.yieldTotal - solo;
+    }
+
+    /** Solo targets (enigma chests) a plan clears. */
+    public int soloPlanned(Plan plan) {
+        if (plan == null || !hasSolo()) return 0;
+        int n = 0;
+        for (Lane l : plan.lanes) {
+            if (l.transTriggers != null) for (Trigger t : l.transTriggers) n += soloIn(t) > 0 ? 1 : 0;
+            if (l.triggers != null) for (Trigger t : l.triggers) n += soloIn(t) > 0 ? 1 : 0;
+        }
+        for (Trigger t : plan.exitTriggers) n += soloIn(t) > 0 ? 1 : 0;
+        return n;
+    }
+
+    private int soloIn(Trigger t) {
+        int v = 0;
+        for (int c : t.cleared) if (soloValue[c] > 0) v += soloValue[c];
+        return v;
+    }
+
     /** Solo targets (enigma chests) in this planner's chest list, and the value of the first one (0 when none). */
     public int[] soloSummary() {
         int n = 0, v = 0;

@@ -394,7 +394,7 @@ public final class RunLog {
               .append(",\"opportunity\":").append(r2(lr.plan.opportunity))
               .append(",\"bailFloor\":").append(r2(lr.planner.P.bailFloor))
               .append(",\"modelS\":").append(r2(lr.plan.tTotal))
-              .append(",\"yield\":").append(lr.plan.yieldTotal)
+              .append(",\"yield\":").append(lr.planner.regularYield(lr.plan))
               .append(",\"pace\":").append(r4(lr.planner.P.pace))
               .append(",\"triggerS\":").append(r4(lr.planner.P.triggerS))
               .append(",\"timeModel\":").append(quote(lr.planner.P.timeModel))
@@ -411,7 +411,8 @@ public final class RunLog {
                   .append(",\"chests\":").append(lr.prunedChests).append('}');
             if (lr.plan.exitHop) sb.append(",\"exitHop\":true");
             int[] solo = lr.planner.soloSummary();
-            if (solo[0] > 0) sb.append(",\"enigma\":{\"n\":").append(solo[0]).append(",\"value\":").append(solo[1]).append('}');
+            if (solo[0] > 0) sb.append(",\"enigma\":{\"n\":").append(solo[0]).append(",\"value\":").append(solo[1])
+                    .append(",\"planned\":").append(lr.planner.soloPlanned(lr.plan)).append('}');
             if (lr.plan.exitStraight) sb.append(",\"exitStraight\":true");
             sb.append(",\"runList\":[");
             for (int i = 0; i < lr.runs.size(); i++) {
